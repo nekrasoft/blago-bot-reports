@@ -35,26 +35,30 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
     Добавление строк в Google-таблицу.
 
     :param rows: Список словарей с ключами Дата, Месяц, Структура, КСП, Операция, КСЗ, Контрагент, Примечание, Объект
-    :param sheet_url: URL таблицы или ID (из переменной GOOGLE_SHEET_ID)
-    :param sheet_name: Имя листа (если пусто — первый лист)
+    :param sheet_url: URL таблицы (переопределяет config)
+    :param sheet_name: Имя листа (переопределяет gid из URL)
     :return: Количество добавленных строк
     """
     if not rows:
         return 0
 
     client = get_sheets_client()
-    sheet_id = sheet_url or os.environ.get("GOOGLE_SHEET_ID")
-    if not sheet_id:
-        raise ValueError("Укажите GOOGLE_SHEET_ID в .env или передайте sheet_url")
+    schema = _load_schema()
 
-    spreadsheet = client.open_by_key(_extract_sheet_id(sheet_id))
+    url = sheet_url or os.environ.get("GOOGLE_SHEET_URL") or schema.get("google_sheet_url")
+    if not url:
+        raise ValueError("Укажите google_sheet_url в config/schema.json или GOOGLE_SHEET_URL в .env")
+
+    sheet_id, gid = _parse_sheet_url(url)
+    spreadsheet = client.open_by_key(sheet_id)
 
     if sheet_name:
         worksheet = spreadsheet.worksheet(sheet_name)
+    elif gid is not None:
+        worksheet = spreadsheet.get_worksheet_by_id(gid)
     else:
         worksheet = spreadsheet.sheet1
 
-    schema = _load_schema()
     all_columns = schema.get("google_sheet_columns", [])
     fill_columns = schema.get("fill_columns", [])
 
@@ -71,10 +75,32 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
     return len(rows)
 
 
-def _extract_sheet_id(url_or_id: str) -> str:
-    """Извлечение ID таблицы из URL или возврат как есть, если уже ID."""
-    if "/d/" in url_or_id:
-        start = url_or_id.find("/d/") + 3
-        end = url_or_id.find("/", start)
-        return url_or_id[start:end] if end > 0 else url_or_id[start:]
-    return url_or_id.strip()
+def _parse_sheet_url(url: str) -> tuple[str, int | None]:
+    """
+    Извлечение ID таблицы и gid листа из URL.
+
+    Поддерживает gid в query (?gid=679928865) и во фрагменте (#gid=679928865).
+
+    :return: (spreadsheet_id, gid или None если не указан)
+    """
+    from urllib.parse import urlparse, parse_qs
+
+    sheet_id = ""
+    gid = None
+
+    if "/d/" in url:
+        start = url.find("/d/") + 3
+        rest = url[start:]
+        sheet_id = rest.split("/")[0].split("?")[0]
+    else:
+        sheet_id = url.strip()
+
+    parsed = urlparse(url)
+    for part in (parsed.query, parsed.fragment):
+        if part and "gid=" in part:
+            params = parse_qs(part)
+            if "gid" in params:
+                gid = int(params["gid"][0])
+                break
+
+    return sheet_id, gid
