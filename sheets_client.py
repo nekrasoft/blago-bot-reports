@@ -85,28 +85,55 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
             if cell.value and str(cell.value).startswith("="):
                 formulas_by_col[col_idx] = str(cell.value)
 
+    # Обновляем только fill_columns и formula_columns, остальные не трогаем
+    update_col_indices = sorted(set(
+        formula_col_indices + [all_columns.index(c) for c in fill_columns if c in all_columns]
+    ))
+
     for row_dict in rows:
-        values = []
-        for col_idx, col in enumerate(all_columns):
+        values_by_idx = {}
+        for col_idx in update_col_indices:
+            col = all_columns[col_idx]
             if col_idx in formulas_by_col:
                 formula = formulas_by_col[col_idx]
                 formula = formula.replace(str(last_row), str(next_row))
-                values.append(formula)
+                values_by_idx[col_idx] = formula
             elif col in fill_columns:
-                values.append(row_dict.get(col, ""))
-            else:
-                values.append("")
-        range_a1 = f"A{next_row}:{_col_letter(len(all_columns))}{next_row}"
-        worksheet.update(range_a1, [values], value_input_option="USER_ENTERED")
-        # Обновляем формулы для следующей строки (текущая строка — источник)
+                values_by_idx[col_idx] = row_dict.get(col, "")
+
+        # Группируем в непрерывные диапазоны для минимума вызовов API
+        ranges_to_update = _get_contiguous_ranges(update_col_indices)
+
+        for start_idx, end_idx in ranges_to_update:
+            values_part = [values_by_idx[i] for i in range(start_idx, end_idx + 1)]
+            range_a1 = f"{_col_letter(start_idx + 1)}{next_row}:{_col_letter(end_idx + 1)}{next_row}"
+            worksheet.update(range_a1, [values_part], value_input_option="USER_ENTERED")
+
         for col_idx in formulas_by_col:
-            formula_in_values = values[col_idx]
+            formula_in_values = values_by_idx.get(col_idx)
             if isinstance(formula_in_values, str) and formula_in_values.startswith("="):
                 formulas_by_col[col_idx] = formula_in_values
         last_row = next_row
         next_row += 1
 
     return len(rows)
+
+
+def _get_contiguous_ranges(indices: list[int]) -> list[tuple[int, int]]:
+    """Разбивает отсортированный список индексов на непрерывные диапазоны (start, end)."""
+    if not indices:
+        return []
+    ranges = []
+    start = indices[0]
+    prev = indices[0]
+    for i in indices[1:]:
+        if i == prev + 1:
+            prev = i
+        else:
+            ranges.append((start, prev))
+            start = prev = i
+    ranges.append((start, prev))
+    return ranges
 
 
 def _col_letter(n: int) -> str:
