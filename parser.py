@@ -55,14 +55,16 @@ def build_system_prompt() -> str:
 
 ## Типы операций:
 - container_pickup: вывоз контейнеров (N контейнеров, контейнер + адрес)
+- trip_removal: ходка — вывоз мусора с земли (не контейнером). Ключевые слова "ходка", "ходки" + название клиента. Примеры: "Ходка акмаш", "2 ходки маяк"
 - landfill_unload: выгрузка на полигоне ("выгрузка в оричах", "N выгрузки")
 - advance: аванс ("аванс взял N")
 - skip: не обрабатывать (пустое, время выезда/окончания, вес и т.п.)
 
 ## Выход — JSON массив. Каждый элемент:
-{{"type": "container_pickup"|"landfill_unload"|"advance", "date": "DD.MM.YYYY", "counterparty": "...", "note": "...", "object_count": N, "unload_count": N}}
+{{"type": "container_pickup"|"trip_removal"|"landfill_unload"|"advance", "date": "DD.MM.YYYY", "counterparty": "...", "note": "...", "object_count": N, "trip_count": N, "unload_count": N}}
 
 Для container_pickup: date, counterparty, note, object_count (обязательно)
+Для trip_removal: date, counterparty (по справочнику; акмаш→Акмаш, маяк→Маяк), note пустое, trip_count (кол-во ходок; если не указано — 1)
 Для landfill_unload: date, unload_count (остальное пусто)
 Для advance: date, counterparty="Водитель Зеленцов", note="аванс"
 Для skip: не включай в массив
@@ -158,6 +160,8 @@ def parse_item_to_row(item: dict, operations: dict, schema: dict) -> dict | None
     # Для выгрузки на полигоне — Объект пустой
     if op_type == "landfill_unload":
         object_count = ""
+    elif op_type == "trip_removal":
+        object_count = item.get("trip_count") or item.get("object_count") or "1"
     else:
         object_count = item.get("object_count") or ""
 
