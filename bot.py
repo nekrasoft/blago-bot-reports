@@ -1,4 +1,5 @@
 # Telegram-бот для приёма и обработки отчётов водителя
+from __future__ import annotations
 
 import logging
 import os
