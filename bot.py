@@ -13,6 +13,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, ChatMemberHa
 
 from parser import parse_message
 from sheets_client import append_rows
+from map_client import update_map_pickup_dates
 
 # Загрузка переменных окружения
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -126,6 +127,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     try:
         append_rows(rows)
+        map_updated = update_map_pickup_dates(rows)
+        if map_updated:
+            logger.info("Обновлено бункеров на карте: %s", map_updated)
         await context.bot.set_message_reaction(
             chat_id=update.effective_chat.id,
             message_id=update.message.message_id,
