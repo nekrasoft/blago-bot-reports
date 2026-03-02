@@ -1,6 +1,7 @@
 # Telegram-бот для приёма и обработки отчётов водителя
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections import deque
@@ -18,6 +19,13 @@ from map_client import update_map_pickup_dates
 # Загрузка переменных окружения
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+PROCESSED_MESSAGES_FILE = PROJECT_ROOT / "data" / "processed_messages.json"
+MAX_PROCESSED_CACHE = 10000
+
+# Кэш в памяти для быстрой проверки
+_PROCESSED_CACHE: set[tuple[int, int]] | None = None
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
@@ -29,6 +37,40 @@ MESSAGE_CONTEXT: dict[int, deque] = {}
 CONTEXT_SIZE = 5
 
 NOT_ALLOWED_MSG = "Извините, бот не может работать в этой группе."
+
+
+def _get_processed_cache() -> set[tuple[int, int]]:
+    """Получение кэша обработанных сообщений (загрузка при первом обращении)."""
+    global _PROCESSED_CACHE
+    if _PROCESSED_CACHE is None:
+        if not PROCESSED_MESSAGES_FILE.exists():
+            _PROCESSED_CACHE = set()
+        else:
+            try:
+                with open(PROCESSED_MESSAGES_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                _PROCESSED_CACHE = {tuple(x) for x in data.get("processed", [])}
+            except Exception:
+                _PROCESSED_CACHE = set()
+    return _PROCESSED_CACHE
+
+
+def _save_processed_message(chat_id: int, message_id: int) -> None:
+    """Добавление сообщения в кэш и файл (после успешной реакции)."""
+    cache = _get_processed_cache()
+    cache.add((chat_id, message_id))
+    if len(cache) > MAX_PROCESSED_CACHE:
+        cache_list = list(cache)[-MAX_PROCESSED_CACHE:]
+        cache.clear()
+        cache.update(cache_list)
+    PROCESSED_MESSAGES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(PROCESSED_MESSAGES_FILE, "w", encoding="utf-8") as f:
+        json.dump({"processed": [list(x) for x in cache]}, f, ensure_ascii=False)
+
+
+def _is_message_processed(chat_id: int, message_id: int) -> bool:
+    """Проверка: уже обработано (бот ставил реакцию)."""
+    return (chat_id, message_id) in _get_processed_cache()
 
 
 def _get_allowed_chat_ids() -> set[int]:
@@ -101,8 +143,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _reject_and_leave(chat_id, context)
         return
 
-    user_id = update.effective_user.id if update.effective_user else None
     message_id = update.message.message_id if update.message else None
+    if _is_message_processed(chat_id, message_id):
+        logger.debug("Сообщение уже обработано, пропуск: chat_id=%s, message_id=%s", chat_id, message_id)
+        return
+
+    user_id = update.effective_user.id if update.effective_user else None
     logger.info("Новое сообщение: chat_id=%s, user_id=%s, message_id=%s", chat_id, user_id, message_id)
 
     text = update.message.text.strip()
@@ -135,6 +181,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             message_id=update.message.message_id,
             reaction=[ReactionTypeEmoji("✍️")],
         )
+        _save_processed_message(update.effective_chat.id, update.message.message_id)
     except Exception as e:
         logger.exception("Ошибка записи в Google Sheets")
         await update.message.reply_text(f"Ошибка записи в таблицу: {e}")
