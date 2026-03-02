@@ -30,6 +30,20 @@ def _get_base_url() -> str | None:
     return url if url else None
 
 
+def get_all_bunkers() -> list[dict]:
+    """Получение всех бункеров с карты."""
+    base = _get_base_url()
+    if not base or not httpx:
+        return []
+    try:
+        resp = httpx.get(f"{base}/api/bunkers", timeout=10.0)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.warning("Ошибка получения бункеров: %s", e)
+        return []
+
+
 def get_bunkers(contractor: str, district: str | None = None) -> list[dict]:
     """Получение списка бункеров по контрагенту и опционально району."""
     base = _get_base_url()
@@ -171,3 +185,55 @@ def update_map_pickup_dates(rows: list[dict]) -> int:
                 logger.info("Обновлена дата вывоза бункера %s: %s", b["id"], iso_date)
 
     return updated
+
+
+def record_pickup_by_bunker_id(
+    bunker_id: str,
+    date_str: str,
+    object_count: int = 1,
+    bunkers_cache: list[dict] | None = None,
+) -> tuple[dict | None, bool]:
+    """
+    Запись вывоза по id бункера: данные для таблицы + обновление карты.
+
+    :return: (row для append_rows, успех обновления карты)
+    """
+    bunkers = bunkers_cache if bunkers_cache is not None else get_all_bunkers()
+    bunker = next((b for b in bunkers if b.get("id") == bunker_id), None)
+    if not bunker:
+        return None, False
+
+    contractor = bunker.get("contractor", "")
+    address = bunker.get("address", "")
+    district = bunker.get("district", "")
+    note = district if district else _address_to_note(address)
+
+    try:
+        dt = datetime.strptime(date_str, "%d.%m.%Y")
+    except ValueError:
+        dt = datetime.now()
+
+    row = {
+        "Дата": date_str,
+        "Месяц": str(dt.month),
+        "Структура": "ЮЛ - Контейнеры",
+        "КСП": "1202",
+        "Операция": "Поступление по основной деятельности",
+        "КСЗ": "1001",
+        "Контрагент": contractor,
+        "Примечание": note,
+        "Объект": str(object_count),
+    }
+
+    iso_date = _date_to_iso(date_str)
+    map_ok = update_bunker_pickup_date(bunker_id, iso_date)
+    return row, map_ok
+
+
+def _address_to_note(addr: str) -> str:
+    """Краткое примечание из адреса (без «Киров, »)."""
+    if not addr:
+        return ""
+    if "," in addr:
+        return addr.split(",", 1)[1].strip()
+    return addr

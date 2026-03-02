@@ -15,6 +15,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, ChatMemberHa
 from parser import parse_message
 from sheets_client import append_rows
 from map_client import update_map_pickup_dates
+from bunker_report import get_bunker_conversation_handler
 
 # Загрузка переменных окружения
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -197,6 +198,7 @@ def main() -> None:
     application.add_handler(
         ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
+    application.add_handler(get_bunker_conversation_handler())
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
