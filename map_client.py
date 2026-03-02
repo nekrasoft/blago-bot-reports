@@ -230,6 +230,30 @@ def record_pickup_by_bunker_id(
     return row, map_ok
 
 
+def build_container_pickup_row(
+    contractor: str,
+    note: str,
+    object_count: int,
+    date_str: str,
+) -> dict:
+    """Строка для таблицы: вывоз контейнеров (для групповой записи)."""
+    try:
+        dt = datetime.strptime(date_str, "%d.%m.%Y")
+    except ValueError:
+        dt = datetime.now()
+    return {
+        "Дата": date_str,
+        "Месяц": str(dt.month),
+        "Структура": "ЮЛ - Контейнеры",
+        "КСП": "1202",
+        "Операция": "Поступление по основной деятельности",
+        "КСЗ": "1001",
+        "Контрагент": contractor,
+        "Примечание": note,
+        "Объект": str(object_count),
+    }
+
+
 def _address_to_note(addr: str) -> str:
     """Краткое примечание из адреса (без «Киров, »)."""
     if not addr:

@@ -13,7 +13,7 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from map_client import get_all_bunkers, record_pickup_by_bunker_id
+from map_client import build_container_pickup_row, get_all_bunkers, record_pickup_by_bunker_id
 from sheets_client import append_rows
 
 STATE_BUNKER = 0
@@ -168,6 +168,22 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         log = context.user_data.get("bunker_log", [])
         if log:
             await query.edit_message_text("Готово.")
+            # Группировка по контрагенту и примечанию, запись в таблицу
+            date_str = datetime.now().strftime("%d.%m.%Y")
+            by_key = defaultdict(list)
+            for item in log:
+                key = (item["contractor"], item["note"])
+                by_key[key].append(item)
+            rows = [
+                build_container_pickup_row(contractor, note, len(items), date_str)
+                for (contractor, note), items in sorted(by_key.items())
+            ]
+            try:
+                append_rows(rows)
+            except Exception as e:
+                chat_id = update.effective_chat.id if update.effective_chat else None
+                if chat_id:
+                    await context.bot.send_message(chat_id=chat_id, text=f"Ошибка записи в таблицу: {e}")
             # Публикуем собранный отчёт в чат
             report = _format_bunker_report(log)
             chat_id = update.effective_chat.id if update.effective_chat else None
@@ -188,12 +204,6 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     row, map_ok = record_pickup_by_bunker_id(bunker_id, date_str, 1)
     if not row:
         await query.answer("Ошибка: бункер не найден.", show_alert=True)
-        return STATE_BUNKER
-
-    try:
-        append_rows([row])
-    except Exception as e:
-        await query.answer(f"Ошибка записи: {e}", show_alert=True)
         return STATE_BUNKER
 
     contractor = row.get("Контрагент", "")
