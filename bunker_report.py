@@ -59,7 +59,9 @@ def _format_bunker_report(log: list[dict]) -> str:
     for contractor, notes in sorted(by_contractor.items()):
         count = len(notes)
         total += count
-        notes_str = ", ".join(notes)
+        # Без дублей адресов: несколько бункеров по одному адресу — адрес один раз
+        unique_notes = list(dict.fromkeys(notes))
+        notes_str = ", ".join(unique_notes)
         lines.append(f"• {contractor} — {count} шт. ({notes_str})")
 
     lines.extend(["", f"Всего: {total} контейнер(ов)"])
