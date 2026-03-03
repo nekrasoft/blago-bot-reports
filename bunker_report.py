@@ -34,13 +34,47 @@ def _get_sorted_bunkers() -> list[dict]:
     )
 
 
+# Типы улиц для удаления из подписи кнопки
+_STREET_TYPES = frozenset(
+    w.lower()
+    for w in (
+        "улица", "ул.", "ул", "проезд", "пр.", "пр", "проспект", "пр-т", "пр-кт",
+        "переулок", "пер.", "пер", "бульвар", "б-р", "шоссе", "набережная", "наб.",
+        "площадь", "пл.", "пл", "тракт", "тупик", "просек",
+    )
+)
+
+
+def _shorten_address(addr: str) -> str:
+    """
+    Сокращение адреса для кнопки:
+    - убрать город,
+    - убрать тип (улица, проезд, проспект и т.п.),
+    - для именных улиц (Романа Ердякова, Дмитрия Козулева) — только фамилия.
+    """
+    if not addr:
+        return ""
+    if "," in addr:
+        addr = addr.split(",", 1)[1].strip()
+    words = [w.rstrip(",") for w in addr.split()]
+    cleaned = [w for w in words if w and w.lower().rstrip(".") not in _STREET_TYPES]
+    if not cleaned:
+        return addr
+    street_words = [w for w in cleaned if not w.lstrip("-").isdigit()]
+    num_part = " ".join(w for w in cleaned if w.lstrip("-").isdigit())
+    if len(street_words) == 2 and street_words[0][0].isupper() and street_words[1][0].isupper():
+        street_part = street_words[-1]
+    else:
+        street_part = " ".join(street_words)
+    result = f"{street_part}, {num_part}".strip(", ") if num_part else street_part
+    return result
+
+
 def _bunker_label(b: dict, max_len: int = 50) -> str:
     """Краткая подпись для кнопки: №12 · Контрагент · Адрес."""
     num = b.get("number", "?")
     contractor = (b.get("contractor") or "").strip()
-    addr = (b.get("address") or "").strip()
-    if "," in addr:
-        addr = addr.split(",", 1)[1].strip()
+    addr = _shorten_address(b.get("address") or "")
     parts = [f"№{num}", contractor, addr]
     label = " · ".join(p for p in parts if p)
     return label[:max_len] + ("…" if len(label) > max_len else "")
