@@ -332,8 +332,9 @@ def get_bunker_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
             CommandHandler("bunker", bunker_start_report),
-            CommandHandler("report", bunker_start_report),
+            CommandHandler("b", bunker_start_report),
             CommandHandler("zayavka", bunker_start_request),
+            CommandHandler("z", bunker_start_request),
         ],
         states={
             STATE_BUNKER: [
