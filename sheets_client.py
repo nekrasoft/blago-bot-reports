@@ -69,21 +69,24 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
     last_row = len(worksheet.col_values(col_data_idx))
     next_row = last_row + 1
 
-    # Колонки с формулами: B (Месяц) и O (Выручка) — копируем формулу с предыдущей строки
+    # Колонки с формулами: B (Месяц) и O (Выручка) — ищем формулу в предыдущих строках
     formula_column_names = schema.get("formula_columns", ["Месяц", "Выручка"])
     formula_col_indices = [
         all_columns.index(name) for name in formula_column_names if name in all_columns
     ]
 
-    # Получаем формулы из последней строки с данными
+    # Для каждой колонки — ищем формулу вверх от last_row, берём первую найденную
+    # formulas_by_col: col_idx -> (formula, source_row)
     formulas_by_col = {}
     if last_row >= 1 and formula_col_indices:
         for col_idx in formula_col_indices:
-            cell = worksheet.cell(
-                last_row, col_idx + 1, value_render_option=ValueRenderOption.formula
-            )
-            if cell.value and str(cell.value).startswith("="):
-                formulas_by_col[col_idx] = str(cell.value)
+            for row in range(last_row, 0, -1):
+                cell = worksheet.cell(
+                    row, col_idx + 1, value_render_option=ValueRenderOption.formula
+                )
+                if cell.value and str(cell.value).startswith("="):
+                    formulas_by_col[col_idx] = (str(cell.value), row)
+                    break
 
     # Обновляем только fill_columns и formula_columns, остальные не трогаем
     update_col_indices = sorted(set(
@@ -95,8 +98,8 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
         for col_idx in update_col_indices:
             col = all_columns[col_idx]
             if col_idx in formulas_by_col:
-                formula = formulas_by_col[col_idx]
-                formula = formula.replace(str(last_row), str(next_row))
+                formula, source_row = formulas_by_col[col_idx]
+                formula = formula.replace(str(source_row), str(next_row))
                 values_by_idx[col_idx] = formula
             elif col in fill_columns:
                 values_by_idx[col_idx] = row_dict.get(col, "")
@@ -109,10 +112,11 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
             range_a1 = f"{_col_letter(start_idx + 1)}{next_row}:{_col_letter(end_idx + 1)}{next_row}"
             worksheet.update(range_a1, [values_part], value_input_option="USER_ENTERED")
 
+        # Для следующей строки формулы обновляем source_row на next_row
         for col_idx in formulas_by_col:
             formula_in_values = values_by_idx.get(col_idx)
             if isinstance(formula_in_values, str) and formula_in_values.startswith("="):
-                formulas_by_col[col_idx] = formula_in_values
+                formulas_by_col[col_idx] = (formula_in_values, next_row)
         last_row = next_row
         next_row += 1
 
