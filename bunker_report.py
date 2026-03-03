@@ -250,7 +250,6 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         mode = context.user_data.get("bunker_mode", "report")
 
         if log:
-            await query.edit_message_text("Готово.")
             chat_id = update.effective_chat.id if update.effective_chat else None
 
             if mode == "report":
@@ -271,11 +270,9 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         await context.bot.send_message(chat_id=chat_id, text=f"Ошибка записи в таблицу: {e}")
                 report = _format_bunker_report(log)
             else:
-                # Режим заявки — только отчёт в чат
                 report = _format_request_report(log)
 
-            if chat_id:
-                await context.bot.send_message(chat_id=chat_id, text=report)
+            await query.edit_message_text(report)
         else:
             msg = "Ничего не принято." if mode == "request" else "Ничего не записано."
             await query.edit_message_text(msg)
