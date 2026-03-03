@@ -105,7 +105,7 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
         ranges_to_update = _get_contiguous_ranges(update_col_indices)
 
         for start_idx, end_idx in ranges_to_update:
-            values_part = [values_by_idx[i] for i in range(start_idx, end_idx + 1)]
+            values_part = [values_by_idx.get(i, "") for i in range(start_idx, end_idx + 1)]
             range_a1 = f"{_col_letter(start_idx + 1)}{next_row}:{_col_letter(end_idx + 1)}{next_row}"
             worksheet.update(range_a1, [values_part], value_input_option="USER_ENTERED")
 
