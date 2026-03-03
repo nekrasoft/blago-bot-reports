@@ -1,4 +1,4 @@
-# Интерактивный отчёт по бункеру: /bunker, /report
+# Интерактивный отчёт по бункеру: /bunker, /report, /zayavka
 
 from __future__ import annotations
 
@@ -13,7 +13,14 @@ from telegram.ext import (
     ConversationHandler,
 )
 
-from map_client import build_container_pickup_row, get_all_bunkers, record_pickup_by_bunker_id
+from map_client import (
+    FILL_LEVEL_REQUEST,
+    build_container_pickup_row,
+    get_all_bunkers,
+    get_bunker_log_entry,
+    record_pickup_by_bunker_id,
+    set_bunker_fill_level,
+)
 from sheets_client import append_rows
 
 STATE_BUNKER = 0
@@ -102,6 +109,27 @@ def _format_bunker_report(log: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_request_report(log: list[dict]) -> str:
+    """Форматирование заявки на опустошение для публикации в чат."""
+    by_contractor = defaultdict(list)
+    for item in log:
+        by_contractor[item["contractor"]].append(item["note"])
+
+    date_str = datetime.now().strftime("%d.%m.%Y")
+    lines = ["✅ Заявка принята", f"Дата: {date_str}", ""]
+
+    total = 0
+    for contractor, notes in sorted(by_contractor.items()):
+        count = len(notes)
+        total += count
+        unique_notes = list(dict.fromkeys(notes))
+        notes_str = ", ".join(unique_notes)
+        lines.append(f"• {contractor} — {count} шт. ({notes_str})")
+
+    lines.extend(["", f"Всего: {total} контейнер(ов)"])
+    return "\n".join(lines)
+
+
 def _build_bunker_keyboard(page: int = 0, exclude_ids: set | frozenset | None = None) -> InlineKeyboardMarkup:
     """Клавиатура со списком бункеров. exclude_ids — уже выбранные (скрываются)."""
     bunkers = _get_sorted_bunkers()
@@ -135,25 +163,41 @@ def _build_bunker_keyboard(page: int = 0, exclude_ids: set | frozenset | None = 
     return InlineKeyboardMarkup(buttons)
 
 
-async def bunker_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Команда /bunker или /report."""
+async def _bunker_start_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Общая логика старта выбора бункеров."""
     if not update.message:
         return ConversationHandler.END
 
     context.user_data["bunker_page"] = 0
     context.user_data["bunker_log"] = []
     context.user_data["bunker_selected_ids"] = set()
+    # Режим задаётся в entry point: "report" или "request"
+    mode = context.user_data.get("bunker_mode", "report")
 
     bunkers = _get_sorted_bunkers()
     if not bunkers:
         await update.message.reply_text("Бункеры не найдены. Проверьте настройку MAP_SERVICE_URL.")
         return ConversationHandler.END
 
-    await update.message.reply_text(
-        "Выберите опустошённый бункер (или несколько по очереди):",
-        reply_markup=_build_bunker_keyboard(0, set()),
-    )
+    if mode == "request":
+        prompt = "Выберите бункер для заявки на опустошение (или несколько по очереди):"
+    else:
+        prompt = "Выберите опустошённый бункер (или несколько по очереди):"
+
+    await update.message.reply_text(prompt, reply_markup=_build_bunker_keyboard(0, set()))
     return STATE_BUNKER
+
+
+async def bunker_start_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Команда /bunker или /report — отчёт о вывозе."""
+    context.user_data["bunker_mode"] = "report"
+    return await _bunker_start_impl(update, context)
+
+
+async def bunker_start_request(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Команда /zayavka — заявка на опустошение (fillLevel=100%)."""
+    context.user_data["bunker_mode"] = "request"
+    return await _bunker_start_impl(update, context)
 
 
 async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -177,11 +221,14 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     available = [b for b in _get_sorted_bunkers() if b.get("id") and b.get("id") not in exclude]
     total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
 
+    mode = context.user_data.get("bunker_mode", "report")
+    prefix = "Принято:" if mode == "request" else "Записано:"
+
     text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
     log = context.user_data.get("bunker_log", [])
     if log:
         preview = ["• {c}, {n}".format(c=x["contractor"], n=x["note"]) for x in log[-3:]]
-        text = "Записано:\n" + "\n".join(preview) + "\n\n" + text
+        text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
     await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude))
     return STATE_BUNKER
@@ -200,31 +247,38 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
     if data == "done":
         log = context.user_data.get("bunker_log", [])
+        mode = context.user_data.get("bunker_mode", "report")
+
         if log:
             await query.edit_message_text("Готово.")
-            # Группировка по контрагенту и примечанию, запись в таблицу
-            date_str = datetime.now().strftime("%d.%m.%Y")
-            by_key = defaultdict(list)
-            for item in log:
-                key = (item["contractor"], item["note"])
-                by_key[key].append(item)
-            rows = [
-                build_container_pickup_row(contractor, note, len(items), date_str)
-                for (contractor, note), items in sorted(by_key.items())
-            ]
-            try:
-                append_rows(rows)
-            except Exception as e:
-                chat_id = update.effective_chat.id if update.effective_chat else None
-                if chat_id:
-                    await context.bot.send_message(chat_id=chat_id, text=f"Ошибка записи в таблицу: {e}")
-            # Публикуем собранный отчёт в чат
-            report = _format_bunker_report(log)
             chat_id = update.effective_chat.id if update.effective_chat else None
+
+            if mode == "report":
+                # Запись в таблицу
+                date_str = datetime.now().strftime("%d.%m.%Y")
+                by_key = defaultdict(list)
+                for item in log:
+                    key = (item["contractor"], item["note"])
+                    by_key[key].append(item)
+                rows = [
+                    build_container_pickup_row(contractor, note, len(items), date_str)
+                    for (contractor, note), items in sorted(by_key.items())
+                ]
+                try:
+                    append_rows(rows)
+                except Exception as e:
+                    if chat_id:
+                        await context.bot.send_message(chat_id=chat_id, text=f"Ошибка записи в таблицу: {e}")
+                report = _format_bunker_report(log)
+            else:
+                # Режим заявки — только отчёт в чат
+                report = _format_request_report(log)
+
             if chat_id:
                 await context.bot.send_message(chat_id=chat_id, text=report)
         else:
-            await query.edit_message_text("Ничего не записано.")
+            msg = "Ничего не принято." if mode == "request" else "Ничего не записано."
+            await query.edit_message_text(msg)
         return ConversationHandler.END
 
     if not data.startswith("bunker:"):
@@ -234,36 +288,47 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not bunker_id:
         return STATE_BUNKER
 
-    date_str = datetime.now().strftime("%d.%m.%Y")
-    row, map_ok = record_pickup_by_bunker_id(bunker_id, date_str, 1)
-    if not row:
-        await query.answer("Ошибка: бункер не найден.", show_alert=True)
-        return STATE_BUNKER
+    mode = context.user_data.get("bunker_mode", "report")
 
-    contractor = row.get("Контрагент", "")
-    note = row.get("Примечание", "")
-    log_entry = {"contractor": contractor, "note": note}
+    if mode == "report":
+        date_str = datetime.now().strftime("%d.%m.%Y")
+        row, map_ok = record_pickup_by_bunker_id(bunker_id, date_str, 1)
+        if not row:
+            await query.answer("Ошибка: бункер не найден.", show_alert=True)
+            return STATE_BUNKER
+        log_entry = {"contractor": row.get("Контрагент", ""), "note": row.get("Примечание", "")}
+    else:
+        log_entry = get_bunker_log_entry(bunker_id)
+        if not log_entry:
+            await query.answer("Ошибка: бункер не найден.", show_alert=True)
+            return STATE_BUNKER
+        map_ok = set_bunker_fill_level(bunker_id, FILL_LEVEL_REQUEST)
+
     if "bunker_log" not in context.user_data:
         context.user_data["bunker_log"] = []
     context.user_data["bunker_log"].append(log_entry)
     selected_ids = context.user_data.get("bunker_selected_ids", set())
     selected_ids.add(bunker_id)
 
-    map_txt = ", карта обновлена" if map_ok else ""
-    await query.answer(f"Записано{map_txt} ✓", show_alert=False)
+    if mode == "request":
+        answer_txt = f"Принято, карта обновлена ✓" if map_ok else "Принято ✓"
+    else:
+        answer_txt = f"Записано, карта обновлена ✓" if map_ok else "Записано ✓"
+    await query.answer(answer_txt, show_alert=False)
 
     page = context.user_data.get("bunker_page", 0)
     preview = ["• {c}, {n}".format(c=x["contractor"], n=x["note"]) for x in context.user_data["bunker_log"][-5:]]
-    text = "Выберите ещё бункер или Готово:\n\n" + "\n".join(preview)
-    await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, selected_ids))
+    prompt_suffix = "Выберите ещё бункер или Готово:\n\n" + "\n".join(preview)
+    await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids))
     return STATE_BUNKER
 
 
 def get_bunker_conversation_handler() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[
-            CommandHandler("bunker", bunker_start),
-            CommandHandler("report", bunker_start),
+            CommandHandler("bunker", bunker_start_report),
+            CommandHandler("report", bunker_start_report),
+            CommandHandler("zayavka", bunker_start_request),
         ],
         states={
             STATE_BUNKER: [

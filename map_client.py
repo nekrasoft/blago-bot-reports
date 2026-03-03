@@ -65,6 +65,27 @@ def get_bunkers(contractor: str, district: str | None = None) -> list[dict]:
 
 # fillLevel 0 = зелёный цвет (пусто после вывоза)
 FILL_LEVEL_AFTER_PICKUP = 0
+# fillLevel 100 = красный (заявка на опустошение)
+FILL_LEVEL_REQUEST = 100
+
+
+def set_bunker_fill_level(bunker_id: str, fill_level: int) -> bool:
+    """Установка заполненности бункера (0–100). Для заявок — 100%."""
+    base = _get_base_url()
+    if not base or not httpx:
+        return False
+
+    try:
+        resp = httpx.put(
+            f"{base}/api/bunkers/{bunker_id}",
+            json={"fillLevel": max(0, min(100, fill_level))},
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        logger.warning("Ошибка обновления заполненности бункера %s: %s", bunker_id, e)
+        return False
 
 
 def update_bunker_pickup_date(bunker_id: str, date_str: str) -> bool:
@@ -261,3 +282,16 @@ def _address_to_note(addr: str) -> str:
     if "," in addr:
         return addr.split(",", 1)[1].strip()
     return addr
+
+
+def get_bunker_log_entry(bunker_id: str) -> dict | None:
+    """Контрагент и примечание для лога. None если бункер не найден."""
+    bunkers = get_all_bunkers()
+    bunker = next((b for b in bunkers if b.get("id") == bunker_id), None)
+    if not bunker:
+        return None
+    contractor = bunker.get("contractor", "")
+    address = bunker.get("address", "")
+    district = bunker.get("district", "")
+    note = district if district else _address_to_note(address)
+    return {"contractor": contractor, "note": note}
