@@ -87,46 +87,43 @@ def _bunker_label(b: dict, max_len: int = 50) -> str:
     return label[:max_len] + ("…" if len(label) > max_len else "")
 
 
+def _address_without_city(addr: str) -> str:
+    """Адрес без названия города (Киров)."""
+    if not addr:
+        return ""
+    for prefix in ("Киров, ", "Киров,"):
+        if addr.startswith(prefix):
+            return addr[len(prefix) :].strip()
+    return addr
+
+
 def _format_bunker_report(log: list[dict]) -> str:
     """Форматирование отчёта по вывозу контейнеров для публикации в чат."""
-    by_contractor = defaultdict(list)
-    for item in log:
-        by_contractor[item["contractor"]].append(item["note"])
-
     date_str = datetime.now().strftime("%d.%m.%Y")
     lines = ["📋 Отчёт по вывозу контейнеров", f"Дата: {date_str}", ""]
 
-    total = 0
-    for contractor, notes in sorted(by_contractor.items()):
-        count = len(notes)
-        total += count
-        # Без дублей адресов: несколько бункеров по одному адресу — адрес один раз
-        unique_notes = list(dict.fromkeys(notes))
-        notes_str = ", ".join(unique_notes)
-        lines.append(f"• {contractor} — {count} шт. ({notes_str})")
+    for item in log:
+        contractor = item.get("contractor", "")
+        num = item.get("number", "?")
+        addr = _address_without_city(item.get("address", ""))
+        lines.append(f"• {contractor} — №{num}, {addr}")
 
-    lines.extend(["", f"Всего: {total} контейнер(ов)"])
+    lines.extend(["", f"Всего: {len(log)} контейнер(ов)"])
     return "\n".join(lines)
 
 
 def _format_request_report(log: list[dict]) -> str:
     """Форматирование заявки на опустошение для публикации в чат."""
-    by_contractor = defaultdict(list)
-    for item in log:
-        by_contractor[item["contractor"]].append(item["note"])
-
     date_str = datetime.now().strftime("%d.%m.%Y")
     lines = ["✅ Заявка принята", f"Дата: {date_str}", ""]
 
-    total = 0
-    for contractor, notes in sorted(by_contractor.items()):
-        count = len(notes)
-        total += count
-        unique_notes = list(dict.fromkeys(notes))
-        notes_str = ", ".join(unique_notes)
-        lines.append(f"• {contractor} — {count} шт. ({notes_str})")
+    for item in log:
+        contractor = item.get("contractor", "")
+        num = item.get("number", "?")
+        addr = _address_without_city(item.get("address", ""))
+        lines.append(f"• {contractor} — №{num}, {addr}")
 
-    lines.extend(["", f"Всего: {total} контейнер(ов)"])
+    lines.extend(["", f"Всего: {len(log)} контейнер(ов)"])
     return "\n".join(lines)
 
 
@@ -227,7 +224,10 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
     log = context.user_data.get("bunker_log", [])
     if log:
-        preview = ["• {c}, {n}".format(c=x["contractor"], n=x["note"]) for x in log[-3:]]
+        preview = [
+            "• {c} — №{n}, {a}".format(c=x.get("contractor", ""), n=x.get("number", "?"), a=_address_without_city(x.get("address", "")))
+            for x in log[-3:]
+        ]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
     await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude))
@@ -296,7 +296,9 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not row:
             await query.answer("Ошибка: бункер не найден.", show_alert=True)
             return STATE_BUNKER
-        log_entry = {"contractor": row.get("Контрагент", ""), "note": row.get("Примечание", "")}
+        log_entry = get_bunker_log_entry(bunker_id)
+        if not log_entry:
+            log_entry = {"contractor": row.get("Контрагент", ""), "note": row.get("Примечание", ""), "number": "?", "address": ""}
     else:
         log_entry = get_bunker_log_entry(bunker_id)
         if not log_entry:
@@ -317,7 +319,10 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer(answer_txt, show_alert=False)
 
     page = context.user_data.get("bunker_page", 0)
-    preview = ["• {c}, {n}".format(c=x["contractor"], n=x["note"]) for x in context.user_data["bunker_log"][-5:]]
+    preview = [
+        "• {c} — №{n}, {a}".format(c=x.get("contractor", ""), n=x.get("number", "?"), a=_address_without_city(x.get("address", "")))
+        for x in context.user_data["bunker_log"][-5:]
+    ]
     prompt_suffix = "Выберите ещё бункер или Готово:\n\n" + "\n".join(preview)
     await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids))
     return STATE_BUNKER

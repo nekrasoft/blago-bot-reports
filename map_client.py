@@ -285,7 +285,7 @@ def _address_to_note(addr: str) -> str:
 
 
 def get_bunker_log_entry(bunker_id: str) -> dict | None:
-    """Контрагент и примечание для лога. None если бункер не найден."""
+    """Контрагент, примечание, номер и адрес для лога. None если бункер не найден."""
     bunkers = get_all_bunkers()
     bunker = next((b for b in bunkers if b.get("id") == bunker_id), None)
     if not bunker:
@@ -294,4 +294,5 @@ def get_bunker_log_entry(bunker_id: str) -> dict | None:
     address = bunker.get("address", "")
     district = bunker.get("district", "")
     note = district if district else _address_to_note(address)
-    return {"contractor": contractor, "note": note}
+    number = bunker.get("number", "?")
+    return {"contractor": contractor, "note": note, "number": number, "address": address}
