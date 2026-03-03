@@ -31,6 +31,19 @@ def _get_allowed_chat_ids() -> set[int]:
     return {int(x.strip()) for x in raw.split(",") if x.strip()}
 
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Логирование и обработка исключений (сетевые ошибки, таймауты и т.п.)."""
+    logger.error("Исключение при обработке обновления:", exc_info=context.error)
+    if update and isinstance(update, Update) and update.effective_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Произошла ошибка. Попробуйте позже.",
+            )
+        except Exception:
+            pass
+
+
 def _is_chat_allowed(chat_id: int, chat_type: str | None) -> bool:
     """Проверка: можно ли боту работать в этом чате."""
     allowed = _get_allowed_chat_ids()
@@ -79,6 +92,7 @@ def main() -> None:
         ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
     application.add_handler(get_bunker_conversation_handler())
+    application.add_error_handler(error_handler)
 
     logger.info("Бот запущен")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
