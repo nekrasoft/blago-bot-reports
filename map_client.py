@@ -30,6 +30,14 @@ def _get_base_url() -> str | None:
     return url if url else None
 
 
+def _get_api_headers() -> dict:
+    """Заголовки для запросов к API карты (API-ключ бота при наличии)."""
+    key = os.environ.get("MAP_BOT_API_KEY", "").strip()
+    if key:
+        return {"X-API-Key": key}
+    return {}
+
+
 def get_all_bunkers() -> list[dict]:
     """Получение всех бункеров с карты."""
     base = _get_base_url()
@@ -72,17 +80,33 @@ FILL_LEVEL_REQUEST = 100
 def set_bunker_fill_level(bunker_id: str, fill_level: int) -> bool:
     """Установка заполненности бункера (0–100). Для заявок — 100%."""
     base = _get_base_url()
-    if not base or not httpx:
+    if not base:
+        logger.warning("MAP_SERVICE_URL не задан — обновление карты недоступно")
+        return False
+    if not httpx:
+        logger.warning("httpx не установлен — обновление карты недоступно")
         return False
 
+    url = f"{base}/api/bunkers/{bunker_id}"
+    headers = _get_api_headers()
     try:
         resp = httpx.put(
-            f"{base}/api/bunkers/{bunker_id}",
+            url,
             json={"fillLevel": max(0, min(100, fill_level))},
+            headers=headers,
             timeout=10.0,
         )
         resp.raise_for_status()
+        logger.info("Карта обновлена: бункер %s, fillLevel=%s", bunker_id, fill_level)
         return True
+    except httpx.HTTPStatusError as e:
+        logger.warning(
+            "Ошибка обновления заполненности бункера %s: HTTP %s, ответ: %s",
+            bunker_id,
+            e.response.status_code,
+            (e.response.text or "")[:200],
+        )
+        return False
     except Exception as e:
         logger.warning("Ошибка обновления заполненности бункера %s: %s", bunker_id, e)
         return False
@@ -94,6 +118,7 @@ def update_bunker_pickup_date(bunker_id: str, date_str: str) -> bool:
     if not base or not httpx:
         return False
 
+    headers = _get_api_headers()
     try:
         resp = httpx.put(
             f"{base}/api/bunkers/{bunker_id}",
@@ -101,6 +126,7 @@ def update_bunker_pickup_date(bunker_id: str, date_str: str) -> bool:
                 "lastPickupDate": date_str,
                 "fillLevel": FILL_LEVEL_AFTER_PICKUP,
             },
+            headers=headers,
             timeout=10.0,
         )
         resp.raise_for_status()
