@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from gspread.utils import ValueRenderOption
 PROJECT_ROOT = Path(__file__).resolve().parent
 CREDENTIALS_PATH = PROJECT_ROOT / "credentials" / "google_service_account.json"
 SCHEMA_PATH = PROJECT_ROOT / "config" / "schema.json"
+
+logger = logging.getLogger(__name__)
 
 # Области доступа для Google API
 SCOPES = [
@@ -44,83 +47,83 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
     if not rows:
         return 0
 
-    client = get_sheets_client()
-    schema = _load_schema()
+    try:
+        client = get_sheets_client()
+        schema = _load_schema()
 
-    url = sheet_url or os.environ.get("GOOGLE_SHEET_URL") or schema.get("google_sheet_url")
-    if not url:
-        raise ValueError("Укажите google_sheet_url в config/schema.json или GOOGLE_SHEET_URL в .env")
+        url = sheet_url or os.environ.get("GOOGLE_SHEET_URL") or schema.get("google_sheet_url")
+        if not url:
+            raise ValueError("Укажите google_sheet_url в config/schema.json или GOOGLE_SHEET_URL в .env")
 
-    sheet_id, gid = _parse_sheet_url(url)
-    spreadsheet = client.open_by_key(sheet_id)
+        sheet_id, gid = _parse_sheet_url(url)
+        spreadsheet = client.open_by_key(sheet_id)
 
-    if sheet_name:
-        worksheet = spreadsheet.worksheet(sheet_name)
-    elif gid is not None:
-        worksheet = spreadsheet.get_worksheet_by_id(gid)
-    else:
-        worksheet = spreadsheet.sheet1
+        if sheet_name:
+            worksheet = spreadsheet.worksheet(sheet_name)
+        elif gid is not None:
+            worksheet = spreadsheet.get_worksheet_by_id(gid)
+        else:
+            worksheet = spreadsheet.sheet1
 
-    all_columns = schema.get("google_sheet_columns", [])
-    fill_columns = schema.get("fill_columns", [])
+        all_columns = schema.get("google_sheet_columns", [])
+        fill_columns = schema.get("fill_columns", [])
 
-    # Находим последнюю строку с данными по колонке "Дата" (всегда заполнена нами)
-    col_data_idx = all_columns.index("Дата") + 1 if "Дата" in all_columns else 1
-    last_row = len(worksheet.col_values(col_data_idx))
-    next_row = last_row + 1
+        # Находим последнюю строку с данными по колонке "Дата" (всегда заполнена нами)
+        col_data_idx = all_columns.index("Дата") + 1 if "Дата" in all_columns else 1
+        last_row = len(worksheet.col_values(col_data_idx))
+        next_row = last_row + 1
 
-    # Колонки с формулами: B (Месяц) и O (Выручка) — ищем формулу в предыдущих строках
-    formula_column_names = schema.get("formula_columns", ["Месяц", "Выручка"])
-    formula_col_indices = [
-        all_columns.index(name) for name in formula_column_names if name in all_columns
-    ]
+        # Колонки с формулами: B (Месяц) и O (Выручка) — ищем формулу в предыдущих строках
+        formula_column_names = schema.get("formula_columns", ["Месяц", "Выручка"])
+        formula_col_indices = [
+            all_columns.index(name) for name in formula_column_names if name in all_columns
+        ]
 
-    # Для каждой колонки — ищем формулу вверх от last_row, берём первую найденную
-    # formulas_by_col: col_idx -> (formula, source_row)
-    formulas_by_col = {}
-    if last_row >= 1 and formula_col_indices:
-        for col_idx in formula_col_indices:
-            for row in range(last_row, 0, -1):
-                cell = worksheet.cell(
-                    row, col_idx + 1, value_render_option=ValueRenderOption.formula
-                )
-                if cell.value and str(cell.value).startswith("="):
-                    formulas_by_col[col_idx] = (str(cell.value), row)
-                    break
+        # Для каждой колонки — ищем формулу вверх от last_row, берём первую найденную
+        formulas_by_col = {}
+        if last_row >= 1 and formula_col_indices:
+            for col_idx in formula_col_indices:
+                for row in range(last_row, 0, -1):
+                    cell = worksheet.cell(
+                        row, col_idx + 1, value_render_option=ValueRenderOption.formula
+                    )
+                    if cell.value and str(cell.value).startswith("="):
+                        formulas_by_col[col_idx] = (str(cell.value), row)
+                        break
 
-    # Обновляем только fill_columns и formula_columns, остальные не трогаем
-    update_col_indices = sorted(set(
-        formula_col_indices + [all_columns.index(c) for c in fill_columns if c in all_columns]
-    ))
+        update_col_indices = sorted(set(
+            formula_col_indices + [all_columns.index(c) for c in fill_columns if c in all_columns]
+        ))
 
-    for row_dict in rows:
-        values_by_idx = {}
-        for col_idx in update_col_indices:
-            col = all_columns[col_idx]
-            if col_idx in formulas_by_col:
-                formula, source_row = formulas_by_col[col_idx]
-                formula = formula.replace(str(source_row), str(next_row))
-                values_by_idx[col_idx] = formula
-            elif col in fill_columns:
-                values_by_idx[col_idx] = row_dict.get(col, "")
+        for row_dict in rows:
+            values_by_idx = {}
+            for col_idx in update_col_indices:
+                col = all_columns[col_idx]
+                if col_idx in formulas_by_col:
+                    formula, source_row = formulas_by_col[col_idx]
+                    formula = formula.replace(str(source_row), str(next_row))
+                    values_by_idx[col_idx] = formula
+                elif col in fill_columns:
+                    values_by_idx[col_idx] = row_dict.get(col, "")
 
-        # Группируем в непрерывные диапазоны для минимума вызовов API
-        ranges_to_update = _get_contiguous_ranges(update_col_indices)
+            ranges_to_update = _get_contiguous_ranges(update_col_indices)
+            for start_idx, end_idx in ranges_to_update:
+                values_part = [values_by_idx.get(i, "") for i in range(start_idx, end_idx + 1)]
+                range_a1 = f"{_col_letter(start_idx + 1)}{next_row}:{_col_letter(end_idx + 1)}{next_row}"
+                worksheet.update(range_a1, [values_part], value_input_option="USER_ENTERED")
 
-        for start_idx, end_idx in ranges_to_update:
-            values_part = [values_by_idx.get(i, "") for i in range(start_idx, end_idx + 1)]
-            range_a1 = f"{_col_letter(start_idx + 1)}{next_row}:{_col_letter(end_idx + 1)}{next_row}"
-            worksheet.update(range_a1, [values_part], value_input_option="USER_ENTERED")
+            for col_idx in formulas_by_col:
+                formula_in_values = values_by_idx.get(col_idx)
+                if isinstance(formula_in_values, str) and formula_in_values.startswith("="):
+                    formulas_by_col[col_idx] = (formula_in_values, next_row)
+            last_row = next_row
+            next_row += 1
 
-        # Для следующей строки формулы обновляем source_row на next_row
-        for col_idx in formulas_by_col:
-            formula_in_values = values_by_idx.get(col_idx)
-            if isinstance(formula_in_values, str) and formula_in_values.startswith("="):
-                formulas_by_col[col_idx] = (formula_in_values, next_row)
-        last_row = next_row
-        next_row += 1
-
-    return len(rows)
+        logger.info("Google Sheets: записано %s строк", len(rows))
+        return len(rows)
+    except Exception as e:
+        logger.error("Google Sheets: ошибка записи — %s", e)
+        raise
 
 
 def _get_contiguous_ranges(indices: list[int]) -> list[tuple[int, int]]:

@@ -46,9 +46,14 @@ def get_all_bunkers() -> list[dict]:
     try:
         resp = httpx.get(f"{base}/api/bunkers", timeout=10.0)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        logger.info("Карта: GET /api/bunkers — загружено %s бункеров", len(data))
+        return data
+    except httpx.HTTPStatusError as e:
+        logger.warning("Карта: GET /api/bunkers — HTTP %s, %s", e.response.status_code, (e.response.text or "")[:150])
+        return []
     except Exception as e:
-        logger.warning("Ошибка получения бункеров: %s", e)
+        logger.warning("Карта: GET /api/bunkers — ошибка: %s", e)
         return []
 
 
@@ -66,8 +71,11 @@ def get_bunkers(contractor: str, district: str | None = None) -> list[dict]:
         resp = httpx.get(f"{base}/api/bunkers", params=params, timeout=10.0)
         resp.raise_for_status()
         return resp.json()
+    except httpx.HTTPStatusError as e:
+        logger.warning("Карта: GET /api/bunkers?contractor=... — HTTP %s", e.response.status_code)
+        return []
     except Exception as e:
-        logger.warning("Ошибка получения бункеров: %s", e)
+        logger.warning("Карта: GET /api/bunkers — ошибка: %s", e)
         return []
 
 
@@ -97,18 +105,16 @@ def set_bunker_fill_level(bunker_id: str, fill_level: int) -> bool:
             timeout=10.0,
         )
         resp.raise_for_status()
-        logger.info("Карта обновлена: бункер %s, fillLevel=%s", bunker_id, fill_level)
+        logger.info("Карта: PUT /api/bunkers/%s — fillLevel=%s, успешно", bunker_id, fill_level)
         return True
     except httpx.HTTPStatusError as e:
         logger.warning(
-            "Ошибка обновления заполненности бункера %s: HTTP %s, ответ: %s",
-            bunker_id,
-            e.response.status_code,
-            (e.response.text or "")[:200],
+            "Карта: PUT /api/bunkers/%s — HTTP %s, %s",
+            bunker_id, e.response.status_code, (e.response.text or "")[:150],
         )
         return False
     except Exception as e:
-        logger.warning("Ошибка обновления заполненности бункера %s: %s", bunker_id, e)
+        logger.warning("Карта: PUT /api/bunkers/%s — ошибка: %s", bunker_id, e)
         return False
 
 
@@ -130,9 +136,13 @@ def update_bunker_pickup_date(bunker_id: str, date_str: str) -> bool:
             timeout=10.0,
         )
         resp.raise_for_status()
+        logger.info("Карта: PUT /api/bunkers/%s — lastPickupDate=%s, fillLevel=0, успешно", bunker_id, date_str)
         return True
+    except httpx.HTTPStatusError as e:
+        logger.warning("Карта: PUT /api/bunkers/%s — HTTP %s, %s", bunker_id, e.response.status_code, (e.response.text or "")[:150])
+        return False
     except Exception as e:
-        logger.warning("Ошибка обновления бункера %s: %s", bunker_id, e)
+        logger.warning("Карта: PUT /api/bunkers/%s — ошибка: %s", bunker_id, e)
         return False
 
 
@@ -229,8 +239,9 @@ def update_map_pickup_dates(rows: list[dict]) -> int:
         for b in bunkers[:object_count]:
             if update_bunker_pickup_date(b["id"], iso_date):
                 updated += 1
-                logger.info("Обновлена дата вывоза бункера %s: %s", b["id"], iso_date)
 
+    if updated:
+        logger.info("Карта: обновлено %s бункеров (дата вывоза)", updated)
     return updated
 
 
