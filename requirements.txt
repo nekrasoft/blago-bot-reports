@@ -1,4 +1,6 @@
 python-telegram-bot>=21.0
+maxapi>=0.9.17
+aiohttp>=3.10,<4
 openai>=1.0,<2.0
 gspread>=6.0
 google-auth>=2.0
