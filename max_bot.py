@@ -182,7 +182,7 @@ async def handle_bunker_callback(event: MessageCallback, context: MemoryContext)
 async def _callback_cancel(event: MessageCallback, context: MemoryContext) -> None:
     """Отмена выбора бункеров."""
     await context.clear()
-    await event.answer(new_text="Отменено.")
+    await event.message.delete()
 
 
 async def _callback_done(event: MessageCallback, context: MemoryContext) -> None:
