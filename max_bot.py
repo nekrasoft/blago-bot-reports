@@ -183,6 +183,7 @@ async def _callback_cancel(event: MessageCallback, context: MemoryContext) -> No
     """Отмена выбора бункеров."""
     await context.clear()
     await event.message.delete()
+    await event.message.answer(text="Отменено.")
 
 
 async def _callback_done(event: MessageCallback, context: MemoryContext) -> None:
@@ -215,7 +216,8 @@ async def _callback_done(event: MessageCallback, context: MemoryContext) -> None
     else:
         report = _format_request_report(bunker_log)
 
-    await event.answer(new_text=report)
+    await event.message.delete()
+    await event.message.answer(text=report)
 
 
 async def _callback_page(
