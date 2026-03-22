@@ -251,7 +251,8 @@ async def _callback_page(
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
     markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
-    await event.answer(new_text=text, attachments=[markup])
+    await event.message.delete()
+    await event.message.answer(text=text, attachments=[markup])
 
 
 async def _callback_bunker(
@@ -308,7 +309,8 @@ async def _callback_bunker(
     ]
     prompt_suffix = f"{answer_txt}\n\nВыберите ещё бункер или Готово:\n\n" + "\n".join(preview)
     markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
-    await event.answer(new_text=prompt_suffix, attachments=[markup])
+    await event.message.delete()
+    await event.message.answer(text=prompt_suffix, attachments=[markup])
 
 
 def main() -> None:
