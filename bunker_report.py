@@ -78,11 +78,12 @@ def _shorten_address(addr: str) -> str:
 
 
 def _bunker_label(b: dict, max_len: int = 50) -> str:
-    """Краткая подпись для кнопки: №12 · Контрагент · Адрес."""
+    """Краткая подпись для кнопки: №12 · Контрагент · Район/адрес."""
     num = b.get("number", "?")
     contractor = (b.get("contractor") or "").strip()
-    addr = _shorten_address(b.get("address") or "")
-    parts = [f"№{num}", contractor, addr]
+    district = (b.get("district") or b.get("District") or "").strip()
+    location = district if district else _shorten_address(b.get("address") or "")
+    parts = [f"№{num}", contractor, location]
     label = " · ".join(p for p in parts if p)
     return label[:max_len] + ("…" if len(label) > max_len else "")
 
