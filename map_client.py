@@ -169,6 +169,11 @@ def _get_district_for_note(note: str) -> str | None:
     return NOTE_TO_DISTRICT.get(n)
 
 
+def _get_bunker_district(bunker: dict) -> str:
+    """Район бункера из API (поддержка district/District)."""
+    return (bunker.get("district") or bunker.get("District") or "").strip()
+
+
 def _filter_bunkers_by_note(bunkers: list[dict], note: str) -> list[dict]:
     """Дополнительная фильтрация бункеров по примечанию (адрес/район)."""
     if not note or not bunkers:
@@ -176,7 +181,7 @@ def _filter_bunkers_by_note(bunkers: list[dict], note: str) -> list[dict]:
 
     district = _get_district_for_note(note)
     if district:
-        filtered = [b for b in bunkers if (b.get("district") or "") == district]
+        filtered = [b for b in bunkers if _get_bunker_district(b) == district]
         return filtered if filtered else bunkers
 
     # Ищем по вхождению в адрес (улица, число)
@@ -263,7 +268,7 @@ def record_pickup_by_bunker_id(
 
     contractor = bunker.get("contractor", "")
     address = bunker.get("address", "")
-    district = bunker.get("district", "")
+    district = _get_bunker_district(bunker)
     note = district if district else _address_to_note(address)
 
     try:
@@ -329,7 +334,7 @@ def get_bunker_log_entry(bunker_id: str) -> dict | None:
         return None
     contractor = bunker.get("contractor", "")
     address = bunker.get("address", "")
-    district = bunker.get("district", "")
+    district = _get_bunker_district(bunker)
     note = district if district else _address_to_note(address)
     number = bunker.get("number", "?")
     return {"contractor": contractor, "note": note, "number": number, "address": address}
