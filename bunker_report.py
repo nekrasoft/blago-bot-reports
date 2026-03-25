@@ -98,6 +98,19 @@ def _address_without_city(addr: str) -> str:
     return addr
 
 
+def _location_for_log_item(item: dict) -> str:
+    """Локация для вывода в сообщениях: district/District, иначе адрес, иначе note."""
+    district = (item.get("district") or item.get("District") or "").strip()
+    if district:
+        return district
+
+    address = _address_without_city(item.get("address", ""))
+    if address:
+        return address
+
+    return (item.get("note") or "").strip()
+
+
 def _format_bunker_report(log: list[dict]) -> str:
     """Форматирование отчёта по вывозу контейнеров для публикации в чат."""
     date_str = datetime.now().strftime("%d.%m.%Y")
@@ -106,8 +119,9 @@ def _format_bunker_report(log: list[dict]) -> str:
     for item in log:
         contractor = item.get("contractor", "")
         num = item.get("number", "?")
-        addr = _address_without_city(item.get("address", ""))
-        lines.append(f"• {contractor} — №{num}, {addr}")
+        location = _location_for_log_item(item)
+        suffix = f", {location}" if location else ""
+        lines.append(f"• {contractor} — №{num}{suffix}")
 
     lines.extend(["", f"Всего: {len(log)} контейнер(ов)"])
     return "\n".join(lines)
@@ -121,8 +135,9 @@ def _format_request_report(log: list[dict]) -> str:
     for item in log:
         contractor = item.get("contractor", "")
         num = item.get("number", "?")
-        addr = _address_without_city(item.get("address", ""))
-        lines.append(f"• {contractor} — №{num}, {addr}")
+        location = _location_for_log_item(item)
+        suffix = f", {location}" if location else ""
+        lines.append(f"• {contractor} — №{num}{suffix}")
 
     lines.extend(["", f"Всего: {len(log)} контейнер(ов)"])
     return "\n".join(lines)

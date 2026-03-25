@@ -337,4 +337,10 @@ def get_bunker_log_entry(bunker_id: str) -> dict | None:
     district = _get_bunker_district(bunker)
     note = district if district else _address_to_note(address)
     number = bunker.get("number", "?")
-    return {"contractor": contractor, "note": note, "number": number, "address": address}
+    return {
+        "contractor": contractor,
+        "note": note,
+        "number": number,
+        "address": address,
+        "district": district,
+    }
