@@ -240,10 +240,7 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
     log = context.user_data.get("bunker_log", [])
     if log:
-        preview = [
-            "• {c} — №{n}, {a}".format(c=x.get("contractor", ""), n=x.get("number", "?"), a=_address_without_city(x.get("address", "")))
-            for x in log[-3:]
-        ]
+        preview = [f"• {_bunker_label(x)}" for x in log[-3:]]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
     await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude))
@@ -332,10 +329,7 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer(answer_txt, show_alert=False)
 
     page = context.user_data.get("bunker_page", 0)
-    preview = [
-        "• {c} — №{n}, {a}".format(c=x.get("contractor", ""), n=x.get("number", "?"), a=_address_without_city(x.get("address", "")))
-        for x in context.user_data["bunker_log"][-5:]
-    ]
+    preview = [f"• {_bunker_label(x)}" for x in context.user_data["bunker_log"][-5:]]
     prompt_suffix = "Выберите ещё бункер или Готово:\n\n" + "\n".join(preview)
     await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids))
     return STATE_BUNKER

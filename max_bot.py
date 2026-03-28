@@ -23,7 +23,6 @@ from maxapi.types import (
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from bunker_report import (
-    _address_without_city,
     _bunker_label,
     _format_bunker_report,
     _format_request_report,
@@ -242,14 +241,7 @@ async def _callback_page(
     text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
 
     if bunker_log:
-        preview = [
-            "• {c} — №{n}, {a}".format(
-                c=x.get("contractor", ""),
-                n=x.get("number", "?"),
-                a=_address_without_city(x.get("address", "")),
-            )
-            for x in bunker_log[-3:]
-        ]
+        preview = [f"• {_bunker_label(x)}" for x in bunker_log[-3:]]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
     markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
@@ -301,14 +293,7 @@ async def _callback_bunker(
     else:
         answer_txt = "Записано, карта обновлена ✓" if map_ok else "Записано ✓"
 
-    preview = [
-        "• {c} — №{n}, {a}".format(
-            c=x.get("contractor", ""),
-            n=x.get("number", "?"),
-            a=_address_without_city(x.get("address", "")),
-        )
-        for x in bunker_log[-5:]
-    ]
+    preview = [f"• {_bunker_label(x)}" for x in bunker_log[-5:]]
     prompt_suffix = f"{answer_txt}\n\nВыберите ещё бункер или Готово:\n\n" + "\n".join(preview)
     markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
     await event.message.delete()
