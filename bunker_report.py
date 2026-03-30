@@ -29,14 +29,34 @@ CANCEL = "cancel"
 
 
 def _get_sorted_bunkers() -> list[dict]:
-    """Все бункеры, отсортированные по контрагенту и адресу."""
+    """Все бункеры, отсортированные по short-name, district и number."""
     bunkers = get_all_bunkers()
+
+    def _norm(value: object) -> str:
+        return str(value or "").strip().lower()
+
+    def _short_name(b: dict) -> str:
+        return _norm(
+            b.get("short-name")
+            or b.get("short_name")
+            or b.get("shortName")
+            or b.get("contractorShortName")
+            or b.get("contractor")
+        )
+
+    def _district(b: dict) -> str:
+        return _norm(b.get("district") or b.get("District"))
+
+    def _number(b: dict) -> str:
+        return _norm(b.get("number"))
+
     return sorted(
         bunkers,
         key=lambda b: (
-            b.get("contractor", ""),
-            b.get("address", ""),
-            b.get("number", ""),
+            _short_name(b),
+            _norm(b.get("contractor")),
+            _district(b),
+            _number(b),
         ),
     )
 
