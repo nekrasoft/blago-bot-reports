@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -32,6 +34,7 @@ from map_client import (
     FILL_LEVEL_REQUEST,
     build_container_pickup_row,
     get_bunker_log_entry,
+    get_daily_counterparties,
     record_pickup_by_bunker_id,
     set_bunker_fill_level,
 )
@@ -48,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 8
 NOT_ALLOWED_MSG = "Извините, бот не может работать в этой группе."
+OPERATIONS_PATH = Path(__file__).resolve().parent / "data" / "operations.json"
 
 
 def _get_allowed_chat_ids() -> set[int]:
@@ -60,6 +64,11 @@ def _get_allowed_chat_ids() -> set[int]:
 
 class BunkerDialog(StatesGroup):
     selecting = State()
+
+
+class HodkaDialog(StatesGroup):
+    selecting = State()
+    waiting_count = State()
 
 
 def _build_bunker_keyboard_max(
@@ -101,6 +110,83 @@ def _build_bunker_keyboard_max(
     return builder.as_markup(), page, total_pages
 
 
+def _counterparty_title(item: dict) -> str:
+    return str(item.get("shortName") or item.get("name") or "").strip()
+
+
+def _load_trip_operation() -> dict:
+    default = {
+        "структура": "ЮЛ - Вывоз мусора",
+        "ксп": "1201",
+        "операция": "Поступление по основной деятельности",
+        "ксз": "1001",
+    }
+    try:
+        with open(OPERATIONS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("trip_removal", default) or default
+    except Exception:
+        return default
+
+
+def _build_trip_row(contractor: str, trips_count: int, date_str: str) -> dict:
+    """Строка для таблицы: ходка/рейс (trip_removal)."""
+    try:
+        dt = datetime.strptime(date_str, "%d.%m.%Y")
+    except ValueError:
+        dt = datetime.now()
+
+    op = _load_trip_operation()
+    return {
+        "Дата": date_str,
+        "Месяц": str(dt.month),
+        "Структура": op.get("структура", "ЮЛ - Вывоз мусора"),
+        "КСП": op.get("ксп", "1201"),
+        "Операция": op.get("операция", "Поступление по основной деятельности"),
+        "КСЗ": op.get("ксз", "1001"),
+        "Контрагент": contractor,
+        "Примечание": "",
+        "Объект": str(trips_count),
+    }
+
+
+def _parse_trips_count(text: str) -> int | None:
+    match = re.search(r"\d+", text or "")
+    if not match:
+        return None
+    value = int(match.group(0))
+    return value if value > 0 else None
+
+
+def _build_hodka_keyboard_max(
+    counterparties: list[dict], page: int = 0
+) -> tuple[object, int, int]:
+    """Клавиатура выбора контрагента для /h (только schedule=daily)."""
+    total = len(counterparties)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(page, total_pages - 1) if total_pages > 0 else 0
+    start = page * PAGE_SIZE
+    chunk = counterparties[start : start + PAGE_SIZE]
+
+    builder = InlineKeyboardBuilder()
+
+    for i, item in enumerate(chunk, start=start):
+        title = _counterparty_title(item)
+        if title:
+            builder.row(CallbackButton(text=title, payload=f"hctr:{i}"))
+
+    nav: list[CallbackButton] = []
+    if page > 0:
+        nav.append(CallbackButton(text="◀ Пред", payload=f"hpage:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(CallbackButton(text="След ▶", payload=f"hpage:{page + 1}"))
+    if nav:
+        builder.row(*nav)
+
+    builder.row(CallbackButton(text="Отмена", payload="hcancel"))
+    return builder.as_markup(), page, total_pages
+
+
 bot = Bot(token=os.environ.get("MAX_BOT_TOKEN", ""))
 dp = Dispatcher()
 
@@ -139,6 +225,30 @@ async def handle_bunker_report(event: MessageCreated, context: MemoryContext) ->
 async def handle_bunker_request(event: MessageCreated, context: MemoryContext) -> None:
     """Команда /zayavka или /z — заявка на опустошение."""
     await _start_bunker_dialog(event, context, mode="request")
+
+
+@dp.message_created(Command("h"))
+async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> None:
+    """Команда /h — ходка/рейс: выбор daily-контрагента и ввод количества."""
+    counterparties = [
+        c for c in get_daily_counterparties() if _counterparty_title(c)
+    ]
+    if not counterparties:
+        await event.message.answer(
+            "Не найдено контрагентов с расписанием daily."
+        )
+        return
+
+    await context.set_state(HodkaDialog.selecting)
+    await context.update_data(
+        hodka_counterparties=counterparties,
+        hodka_selected_contractor="",
+        hodka_page=0,
+    )
+
+    markup, _, _ = _build_hodka_keyboard_max(counterparties, 0)
+    prompt = "Команда /h (ходка/рейс).\nВыберите контрагента с расписанием daily:"
+    await event.message.answer(text=prompt, attachments=[markup])
 
 
 async def _start_bunker_dialog(
@@ -298,6 +408,105 @@ async def _callback_bunker(
     markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
     await event.message.delete()
     await event.message.answer(text=prompt_suffix, attachments=[markup])
+
+
+@dp.message_callback(HodkaDialog.selecting)
+async def handle_hodka_callback(event: MessageCallback, context: MemoryContext) -> None:
+    """Обработка кнопок выбора контрагента для /h."""
+    payload = event.callback.payload or ""
+    data = await context.get_data()
+    counterparties = data.get("hodka_counterparties", [])
+    page = int(data.get("hodka_page", 0) or 0)
+
+    if payload == "hcancel":
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer(text="Отменено.")
+        return
+
+    if not isinstance(counterparties, list) or not counterparties:
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer(text="Список контрагентов пуст. Запустите /h заново.")
+        return
+
+    if payload.startswith("hpage:"):
+        try:
+            page = int(payload.replace("hpage:", "", 1))
+        except ValueError:
+            page = 0
+        await context.update_data(hodka_page=page)
+        markup, page, total_pages = _build_hodka_keyboard_max(counterparties, page)
+        text = f"Стр. {page + 1}/{total_pages}. Выберите контрагента с расписанием daily:"
+        await event.message.delete()
+        await event.message.answer(text=text, attachments=[markup])
+        return
+
+    if not payload.startswith("hctr:"):
+        return
+
+    try:
+        idx = int(payload.replace("hctr:", "", 1))
+    except ValueError:
+        await event.message.answer("Некорректный выбор. Попробуйте снова.")
+        return
+
+    if idx < 0 or idx >= len(counterparties):
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer("Список устарел. Запустите /h заново.")
+        return
+
+    contractor = _counterparty_title(counterparties[idx])
+    if not contractor:
+        await event.message.answer("Контрагент не найден. Попробуйте снова.")
+        return
+
+    await context.set_state(HodkaDialog.waiting_count)
+    await context.update_data(hodka_selected_contractor=contractor)
+
+    await event.message.delete()
+    await event.message.answer(
+        text=f"Контрагент: {contractor}\nВведите количество ходок (целое число):"
+    )
+
+
+@dp.message_created(HodkaDialog.waiting_count)
+async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> None:
+    """Приём количества ходок и запись строки trip_removal в Google Sheets."""
+    body = getattr(event.message, "body", None)
+    text = str(getattr(body, "text", "") or "").strip()
+    if text.lower() in {"отмена", "cancel", "/cancel"}:
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    if not text:
+        await event.message.answer("Введите число ходок, например: 2")
+        return
+
+    trips_count = _parse_trips_count(text)
+    if not trips_count:
+        await event.message.answer("Введите положительное целое число, например: 2")
+        return
+
+    data = await context.get_data()
+    contractor = str(data.get("hodka_selected_contractor") or "").strip()
+    if not contractor:
+        await context.clear()
+        await event.message.answer("Контрагент не выбран. Запустите /h заново.")
+        return
+
+    date_str = datetime.now().strftime("%d.%m.%Y")
+    row = _build_trip_row(contractor, trips_count, date_str)
+
+    try:
+        append_rows([row])
+    except Exception as e:
+        await event.message.answer(f"Ошибка записи в таблицу: {e}")
+        return
+
+    await context.clear()
+    await event.message.answer(text=f"Записано: {contractor}, ходок: {trips_count}.")
 
 
 def main() -> None:

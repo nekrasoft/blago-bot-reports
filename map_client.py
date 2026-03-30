@@ -57,6 +57,60 @@ def get_all_bunkers() -> list[dict]:
         return []
 
 
+def get_counterparties() -> list[dict]:
+    """Получение справочника контрагентов с карты."""
+    base = _get_base_url()
+    if not base or not httpx:
+        return []
+    headers = _get_api_headers()
+    try:
+        resp = httpx.get(f"{base}/api/counterparties", headers=headers, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            logger.warning("Карта: GET /api/counterparties — неожиданный формат ответа")
+            return []
+        logger.info("Карта: GET /api/counterparties — загружено %s контрагентов", len(data))
+        return data
+    except httpx.HTTPStatusError as e:
+        logger.warning(
+            "Карта: GET /api/counterparties — HTTP %s, %s",
+            e.response.status_code,
+            (e.response.text or "")[:150],
+        )
+        return []
+    except Exception as e:
+        logger.warning("Карта: GET /api/counterparties — ошибка: %s", e)
+        return []
+
+
+def get_daily_counterparties() -> list[dict]:
+    """Контрагенты из справочника карты, у которых schedule содержит daily."""
+    result = []
+    for item in get_counterparties():
+        schedule_raw = str(item.get("schedule") or "").strip().lower()
+        if not schedule_raw:
+            continue
+        tokens = [x.strip() for x in schedule_raw.replace(";", ",").split(",")]
+        if "daily" not in tokens:
+            continue
+        result.append(
+            {
+                "id": item.get("id"),
+                "shortName": str(item.get("shortName") or item.get("short_name") or "").strip(),
+                "name": str(item.get("name") or "").strip(),
+                "schedule": item.get("schedule"),
+            }
+        )
+    return sorted(
+        result,
+        key=lambda c: (
+            (c.get("shortName") or c.get("name") or "").lower(),
+            str(c.get("id") or ""),
+        ),
+    )
+
+
 def get_bunkers(contractor: str, district: str | None = None) -> list[dict]:
     """Получение списка бункеров по контрагенту и опционально району."""
     base = _get_base_url()

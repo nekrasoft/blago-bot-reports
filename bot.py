@@ -11,6 +11,7 @@ from telegram import Update
 from telegram.ext import Application, ContextTypes, ChatMemberHandler
 
 from bunker_report import get_bunker_conversation_handler
+from trip_report import get_hodka_conversation_handler
 
 # Загрузка переменных окружения
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -93,6 +94,7 @@ def main() -> None:
     application.add_handler(
         ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )
+    application.add_handler(get_hodka_conversation_handler())
     application.add_handler(get_bunker_conversation_handler())
     application.add_error_handler(error_handler)
 
