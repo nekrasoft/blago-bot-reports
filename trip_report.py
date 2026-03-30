@@ -110,7 +110,7 @@ async def hodka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     context.user_data["hodka_counterparties"] = counterparties
 
     await update.message.reply_text(
-        "Команда /h (ходка/рейс).\nВыберите контрагента с расписанием daily:",
+        "Команда /h (ходка/рейс).\nВыберите контрагента, для которого были сделаны ходки:",
         reply_markup=_build_hodka_keyboard(counterparties),
     )
     return STATE_HODKA_SELECT

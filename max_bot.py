@@ -247,7 +247,7 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
     )
 
     markup, _, _ = _build_hodka_keyboard_max(counterparties, 0)
-    prompt = "Команда /h (ходка/рейс).\nВыберите контрагента с расписанием daily:"
+    prompt = "Команда /h (ходка/рейс).\nВыберите контрагента, для которого были сделаны ходки:"
     await event.message.answer(text=prompt, attachments=[markup])
 
 
