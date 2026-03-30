@@ -20,6 +20,13 @@ import urllib.error
 BASE = os.environ.get("MAP_SERVICE_URL", "https://map.blagokirov.ru").rstrip("/")
 
 
+def _get_read_headers() -> dict:
+    read_key = os.environ.get("MAP_BOT_READ_API_KEY", "").strip()
+    write_key = os.environ.get("MAP_BOT_API_KEY", "").strip()
+    key = read_key or write_key
+    return {"X-API-Key": key} if key else {}
+
+
 def main():
     if not BASE:
         print("Ошибка: MAP_SERVICE_URL не задан в .env")
@@ -31,7 +38,7 @@ def main():
     # 1. GET — загрузка бункеров
     print("1. GET /api/bunkers ...")
     try:
-        req = urllib.request.Request(f"{BASE}/api/bunkers")
+        req = urllib.request.Request(f"{BASE}/api/bunkers", headers=_get_read_headers())
         with urllib.request.urlopen(req, timeout=10) as r:
             bunkers = json.loads(r.read().decode())
         print(f"   Статус: 200")

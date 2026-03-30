@@ -30,12 +30,24 @@ def _get_base_url() -> str | None:
     return url if url else None
 
 
-def _get_api_headers() -> dict:
-    """Заголовки для запросов к API карты (API-ключ бота при наличии)."""
-    key = os.environ.get("MAP_BOT_API_KEY", "").strip()
+def _build_api_key_headers(key: str) -> dict:
+    key = (key or "").strip()
     if key:
         return {"X-API-Key": key}
     return {}
+
+
+def _get_read_api_headers() -> dict:
+    """Заголовки для чтения из API карты."""
+    read_key = os.environ.get("MAP_BOT_READ_API_KEY", "").strip()
+    write_key = os.environ.get("MAP_BOT_API_KEY", "").strip()
+    return _build_api_key_headers(read_key or write_key)
+
+
+def _get_write_api_headers() -> dict:
+    """Заголовки для записи в API карты."""
+    write_key = os.environ.get("MAP_BOT_API_KEY", "").strip()
+    return _build_api_key_headers(write_key)
 
 
 def get_all_bunkers() -> list[dict]:
@@ -43,8 +55,9 @@ def get_all_bunkers() -> list[dict]:
     base = _get_base_url()
     if not base or not httpx:
         return []
+    headers = _get_read_api_headers()
     try:
-        resp = httpx.get(f"{base}/api/bunkers", timeout=10.0)
+        resp = httpx.get(f"{base}/api/bunkers", headers=headers, timeout=10.0)
         resp.raise_for_status()
         data = resp.json()
         logger.info("Карта: GET /api/bunkers — загружено %s бункеров", len(data))
@@ -62,7 +75,7 @@ def get_counterparties() -> list[dict]:
     base = _get_base_url()
     if not base or not httpx:
         return []
-    headers = _get_api_headers()
+    headers = _get_read_api_headers()
     try:
         resp = httpx.get(f"{base}/api/counterparties", headers=headers, timeout=10.0)
         resp.raise_for_status()
@@ -121,8 +134,9 @@ def get_bunkers(contractor: str, district: str | None = None) -> list[dict]:
     if district:
         params["district"] = district
 
+    headers = _get_read_api_headers()
     try:
-        resp = httpx.get(f"{base}/api/bunkers", params=params, timeout=10.0)
+        resp = httpx.get(f"{base}/api/bunkers", params=params, headers=headers, timeout=10.0)
         resp.raise_for_status()
         return resp.json()
     except httpx.HTTPStatusError as e:
@@ -150,7 +164,7 @@ def set_bunker_fill_level(bunker_id: str, fill_level: int) -> bool:
         return False
 
     url = f"{base}/api/bunkers/{bunker_id}"
-    headers = _get_api_headers()
+    headers = _get_write_api_headers()
     try:
         resp = httpx.put(
             url,
@@ -178,7 +192,7 @@ def update_bunker_pickup_date(bunker_id: str, date_str: str) -> bool:
     if not base or not httpx:
         return False
 
-    headers = _get_api_headers()
+    headers = _get_write_api_headers()
     try:
         resp = httpx.put(
             f"{base}/api/bunkers/{bunker_id}",
