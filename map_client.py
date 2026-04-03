@@ -97,22 +97,19 @@ def get_counterparties() -> list[dict]:
         return []
 
 
-def get_daily_counterparties() -> list[dict]:
-    """Контрагенты из справочника карты, у которых schedule содержит daily."""
+def get_trip_removal_counterparties() -> list[dict]:
+    """Контрагенты из справочника карты с operation_type=trip_removal."""
     result = []
     for item in get_counterparties():
-        schedule_raw = str(item.get("schedule") or "").strip().lower()
-        if not schedule_raw:
-            continue
-        tokens = [x.strip() for x in schedule_raw.replace(";", ",").split(",")]
-        if "daily" not in tokens:
+        operation_type = str(item.get("operation_type") or "").strip().lower()
+        if operation_type != "trip_removal":
             continue
         result.append(
             {
                 "id": item.get("id"),
                 "shortName": str(item.get("shortName") or item.get("short_name") or "").strip(),
                 "name": str(item.get("name") or "").strip(),
-                "schedule": item.get("schedule"),
+                "operation_type": item.get("operation_type"),
             }
         )
     return sorted(

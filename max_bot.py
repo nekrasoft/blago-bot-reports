@@ -34,7 +34,7 @@ from map_client import (
     FILL_LEVEL_REQUEST,
     build_container_pickup_row,
     get_bunker_log_entry,
-    get_daily_counterparties,
+    get_trip_removal_counterparties,
     record_pickup_by_bunker_id,
     set_bunker_fill_level,
 )
@@ -161,7 +161,7 @@ def _parse_trips_count(text: str) -> int | None:
 def _build_hodka_keyboard_max(
     counterparties: list[dict], page: int = 0
 ) -> tuple[object, int, int]:
-    """Клавиатура выбора контрагента для /h (только schedule=daily)."""
+    """Клавиатура выбора контрагента для /h (operation_type=trip_removal)."""
     total = len(counterparties)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
     page = min(page, total_pages - 1) if total_pages > 0 else 0
@@ -229,13 +229,13 @@ async def handle_bunker_request(event: MessageCreated, context: MemoryContext) -
 
 @dp.message_created(Command("h"))
 async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> None:
-    """Команда /h — ходка/рейс: выбор daily-контрагента и ввод количества."""
+    """Команда /h — ходка/рейс: выбор trip_removal-контрагента и ввод количества."""
     counterparties = [
-        c for c in get_daily_counterparties() if _counterparty_title(c)
+        c for c in get_trip_removal_counterparties() if _counterparty_title(c)
     ]
     if not counterparties:
         await event.message.answer(
-            "Не найдено контрагентов с расписанием daily."
+            "Не найдено контрагентов с operation_type=trip_removal."
         )
         return
 
@@ -437,7 +437,7 @@ async def handle_hodka_callback(event: MessageCallback, context: MemoryContext) 
             page = 0
         await context.update_data(hodka_page=page)
         markup, page, total_pages = _build_hodka_keyboard_max(counterparties, page)
-        text = f"Стр. {page + 1}/{total_pages}. Выберите контрагента с расписанием daily:"
+        text = f"Стр. {page + 1}/{total_pages}. Выберите контрагента с operation_type=trip_removal:"
         await event.message.delete()
         await event.message.answer(text=text, attachments=[markup])
         return

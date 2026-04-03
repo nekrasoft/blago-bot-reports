@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from map_client import get_daily_counterparties
+from map_client import get_trip_removal_counterparties
 from sheets_client import append_rows
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -94,15 +94,15 @@ def _parse_trips_count(text: str) -> int | None:
 
 
 async def hodka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Команда /h — ходка/рейс: выбор daily-контрагента и ввод количества."""
+    """Команда /h — ходка/рейс: выбор trip_removal-контрагента и ввод количества."""
     if not update.message:
         return ConversationHandler.END
 
-    counterparties = get_daily_counterparties()
+    counterparties = get_trip_removal_counterparties()
     counterparties = [c for c in counterparties if _counterparty_title(c)]
     if not counterparties:
         await update.message.reply_text(
-            "Не найдено контрагентов с расписанием daily."
+            "Не найдено контрагентов с operation_type=trip_removal."
         )
         return ConversationHandler.END
 
@@ -119,7 +119,7 @@ async def hodka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def hodka_select_counterparty(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """Выбор контрагента из списка daily."""
+    """Выбор контрагента из списка trip_removal."""
     query = update.callback_query
     if not query:
         return ConversationHandler.END
