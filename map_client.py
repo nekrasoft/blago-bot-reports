@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,7 @@ NOTE_TO_DISTRICT = {
     "знак": "Знак",
     "инноград": "Инноград",
 }
+_BUNKER_NUMBER_RE = re.compile(r"\d+")
 
 
 def _get_base_url() -> str | None:
@@ -228,9 +230,63 @@ def _is_container_pickup(row: dict) -> bool:
     )
 
 
+def _normalize_bunker_number(value: object) -> str | None:
+    raw = str(value or "").strip()
+    if not raw or raw == "?":
+        return None
+    match = _BUNKER_NUMBER_RE.search(raw)
+    if match:
+        return match.group(0)
+    return raw
+
+
+def split_note_and_bunker_numbers(note: str) -> tuple[str, list[str]]:
+    """Разделение примечания вида 'Район/адрес # 2,4,5'."""
+    raw = (note or "").strip()
+    if not raw:
+        return "", []
+    if "#" not in raw:
+        return raw, []
+
+    note_part, bunker_part = raw.split("#", 1)
+    note_text = note_part.strip()
+    numbers: list[str] = []
+    seen: set[str] = set()
+    for number in _BUNKER_NUMBER_RE.findall(bunker_part):
+        if number in seen:
+            continue
+        seen.add(number)
+        numbers.append(number)
+    return note_text, numbers
+
+
+def format_note_with_bunker_numbers(
+    note: str,
+    bunker_numbers: list[object] | None = None,
+) -> str:
+    """Сборка примечания в формате 'Район/адрес # 2,4,5'."""
+    note_text, parsed_numbers = split_note_and_bunker_numbers(note)
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    for value in [*parsed_numbers, *(bunker_numbers or [])]:
+        normalized = _normalize_bunker_number(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+
+    if not ordered:
+        return note_text
+    if note_text:
+        return f"{note_text} # {','.join(ordered)}"
+    return f"# {','.join(ordered)}"
+
+
 def _get_district_for_note(note: str) -> str | None:
     """Получение district по примечанию."""
-    n = (note or "").strip().lower()
+    note_text, _ = split_note_and_bunker_numbers(note)
+    n = note_text.strip().lower()
     return NOTE_TO_DISTRICT.get(n)
 
 
@@ -241,16 +297,17 @@ def _get_bunker_district(bunker: dict) -> str:
 
 def _filter_bunkers_by_note(bunkers: list[dict], note: str) -> list[dict]:
     """Дополнительная фильтрация бункеров по примечанию (адрес/район)."""
-    if not note or not bunkers:
+    note_text, _ = split_note_and_bunker_numbers(note)
+    if not note_text or not bunkers:
         return bunkers
 
-    district = _get_district_for_note(note)
+    district = _get_district_for_note(note_text)
     if district:
         filtered = [b for b in bunkers if _get_bunker_district(b) == district]
         return filtered if filtered else bunkers
 
     # Ищем по вхождению в адрес (улица, число)
-    note_lower = note.lower().strip()
+    note_lower = note_text.lower().strip()
     note_clean = note_lower.replace(" ", "").replace(".", "")
     result = []
     for b in bunkers:

@@ -16,6 +16,7 @@ from telegram.ext import (
 from map_client import (
     FILL_LEVEL_REQUEST,
     build_container_pickup_row,
+    format_note_with_bunker_numbers,
     get_all_bunkers,
     get_bunker_log_entry,
     record_pickup_by_bunker_id,
@@ -292,10 +293,20 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 for item in log:
                     key = (item["contractor"], item["note"])
                     by_key[key].append(item)
-                rows = [
-                    build_container_pickup_row(contractor, note, len(items), date_str)
-                    for (contractor, note), items in sorted(by_key.items())
-                ]
+                rows = []
+                for (contractor, note), items in sorted(by_key.items()):
+                    note_with_numbers = format_note_with_bunker_numbers(
+                        note,
+                        [item.get("number") for item in items],
+                    )
+                    rows.append(
+                        build_container_pickup_row(
+                            contractor,
+                            note_with_numbers,
+                            len(items),
+                            date_str,
+                        )
+                    )
                 try:
                     append_rows(rows)
                 except Exception as e:
