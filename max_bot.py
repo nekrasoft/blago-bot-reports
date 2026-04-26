@@ -31,13 +31,12 @@ from bunker_report import (
     _get_sorted_bunkers,
 )
 from map_client import (
-    FILL_LEVEL_REQUEST,
     build_container_pickup_row,
     format_note_with_bunker_numbers,
     get_bunker_log_entry,
     get_trip_removal_counterparties,
+    mark_bunker_filled,
     record_pickup_by_bunker_id,
-    set_bunker_fill_level,
 )
 from sheets_client import append_rows
 
@@ -403,7 +402,7 @@ async def _callback_bunker(
         if not log_entry:
             await event.message.answer("Ошибка: бункер не найден.")
             return
-        map_ok = set_bunker_fill_level(bunker_id, FILL_LEVEL_REQUEST)
+        map_ok = mark_bunker_filled(bunker_id)
 
     bunker_log.append(log_entry)
     selected_ids.add(bunker_id)

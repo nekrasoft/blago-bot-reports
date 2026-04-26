@@ -14,13 +14,12 @@ from telegram.ext import (
 )
 
 from map_client import (
-    FILL_LEVEL_REQUEST,
     build_container_pickup_row,
     format_note_with_bunker_numbers,
     get_all_bunkers,
     get_bunker_log_entry,
+    mark_bunker_filled,
     record_pickup_by_bunker_id,
-    set_bunker_fill_level,
 )
 from sheets_client import append_rows
 
@@ -345,7 +344,7 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not log_entry:
             await query.answer("Ошибка: бункер не найден.", show_alert=True)
             return STATE_BUNKER
-        map_ok = set_bunker_fill_level(bunker_id, FILL_LEVEL_REQUEST)
+        map_ok = mark_bunker_filled(bunker_id)
 
     if "bunker_log" not in context.user_data:
         context.user_data["bunker_log"] = []

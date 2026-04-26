@@ -185,6 +185,36 @@ def set_bunker_fill_level(bunker_id: str, fill_level: int) -> bool:
         return False
 
 
+def mark_bunker_filled(bunker_id: str) -> bool:
+    """Создание заявки на опустошение через API карты с записью в историю."""
+    base = _get_base_url()
+    if not base:
+        logger.warning("MAP_SERVICE_URL не задан — заявка на опустошение недоступна")
+        return False
+    if not httpx:
+        logger.warning("httpx не установлен — заявка на опустошение недоступна")
+        return False
+
+    url = f"{base}/api/bunkers/{bunker_id}/mark-filled"
+    headers = _get_write_api_headers()
+    try:
+        resp = httpx.post(url, headers=headers, timeout=10.0)
+        resp.raise_for_status()
+        logger.info("Карта: POST /api/bunkers/%s/mark-filled — успешно", bunker_id)
+        return True
+    except httpx.HTTPStatusError as e:
+        logger.warning(
+            "Карта: POST /api/bunkers/%s/mark-filled — HTTP %s, %s",
+            bunker_id,
+            e.response.status_code,
+            (e.response.text or "")[:150],
+        )
+        return False
+    except Exception as e:
+        logger.warning("Карта: POST /api/bunkers/%s/mark-filled — ошибка: %s", bunker_id, e)
+        return False
+
+
 def update_bunker_pickup_date(bunker_id: str, date_str: str) -> bool:
     """Обновление даты вывоза и заполненности бункера (зелёный после вывоза)."""
     base = _get_base_url()
