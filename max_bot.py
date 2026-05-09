@@ -11,7 +11,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import aiohttp
 from dotenv import load_dotenv
@@ -250,6 +250,22 @@ def _detect_waybill_content_type(
     return content_type or guessed
 
 
+def _waybill_extension_for_content_type(content_type: str | None) -> str:
+    content_type = (content_type or "").split(";", 1)[0].lower().strip()
+    if content_type == "application/pdf":
+        return ".pdf"
+    if content_type == "image/jpeg":
+        return ".jpg"
+    if content_type == "image/png":
+        return ".png"
+    if content_type == "image/webp":
+        return ".webp"
+    if content_type == "image/gif":
+        return ".gif"
+    guessed = mimetypes.guess_extension(content_type or "")
+    return guessed or ""
+
+
 def _attachment_type_text(attachment: object) -> str:
     raw = getattr(attachment, "type", "") or ""
     value = getattr(raw, "value", raw)
@@ -271,11 +287,45 @@ def _attachment_payload_token(attachment: object) -> str:
 
 
 def _attachment_file_name(attachment: object, url: str) -> str:
-    file_name = str(getattr(attachment, "filename", "") or "").strip()
+    payload = getattr(attachment, "payload", None)
+    payload_get = (
+        payload.get if isinstance(payload, dict) else lambda key, default=None: default
+    )
+    file_name = str(
+        getattr(attachment, "filename", "")
+        or getattr(attachment, "file_name", "")
+        or getattr(attachment, "name", "")
+        or payload_get("filename")
+        or payload_get("file_name")
+        or payload_get("name")
+        or ""
+    ).strip()
     if file_name:
         return Path(file_name).name
-    parsed_path = Path(urlparse(url).path)
-    return parsed_path.name
+    if _attachment_type_text(attachment) == "image":
+        return ""
+    parsed_path = Path(unquote(urlparse(url).path))
+    url_file_name = parsed_path.name
+    return url_file_name if Path(url_file_name).suffix else ""
+
+
+def _normalize_waybill_file_name(
+    file_name: str,
+    content_type: str | None,
+    file_bytes: bytes,
+    file_name_seed: str,
+) -> str:
+    suffix = Path(file_name).suffix
+    if suffix:
+        return Path(file_name).name
+
+    extension = _waybill_extension_for_content_type(content_type)
+    token = re.sub(r"[^A-Za-z0-9_-]+", "", file_name_seed or "")[:24]
+    if not token:
+        import hashlib
+
+        token = hashlib.sha256(file_bytes).hexdigest()[:12]
+    return f"waybill_{token}{extension}"
 
 
 def _select_max_waybill_attachment(attachments: list[object]) -> object | None:
@@ -347,12 +397,19 @@ async def _download_max_waybill(message) -> dict:
     detected_content_type = _detect_waybill_content_type(file_name, content_type, file_bytes)
     if not _is_supported_waybill_type(file_name, detected_content_type):
         raise ValueError("Можно загрузить только картинку или PDF.")
+    source_file_id = token or url
+    file_name = _normalize_waybill_file_name(
+        file_name,
+        detected_content_type,
+        file_bytes,
+        token,
+    )
 
     return {
         "file_bytes": file_bytes,
         "file_name": file_name,
         "content_type": detected_content_type,
-        "source_file_id": _attachment_payload_token(attachment) or url,
+        "source_file_id": source_file_id,
     }
 
 
