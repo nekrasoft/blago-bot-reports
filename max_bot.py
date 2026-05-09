@@ -8,12 +8,12 @@ import mimetypes
 import os
 import re
 import sys
-import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
+import aiohttp
 from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.context import MemoryContext, State, StatesGroup
@@ -258,11 +258,15 @@ def _attachment_type_text(attachment: object) -> str:
 
 def _attachment_payload_url(attachment: object) -> str:
     payload = getattr(attachment, "payload", None)
+    if isinstance(payload, dict):
+        return str(payload.get("url") or "").strip()
     return str(getattr(payload, "url", "") or "").strip()
 
 
 def _attachment_payload_token(attachment: object) -> str:
     payload = getattr(attachment, "payload", None)
+    if isinstance(payload, dict):
+        return str(payload.get("token") or "").strip()
     return str(getattr(payload, "token", "") or "").strip()
 
 
@@ -288,6 +292,38 @@ def _select_max_waybill_attachment(attachments: list[object]) -> object | None:
     return None
 
 
+async def _download_max_attachment_bytes(
+    url: str,
+    token: str,
+    max_size: int,
+) -> tuple[bytes, str]:
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    chunks: list[bytes] = []
+    total_size = 0
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200:
+                raise ValueError("Не удалось скачать файл из MAX. Попробуйте отправить его ещё раз.")
+
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    declared_size = int(content_length)
+                except ValueError:
+                    declared_size = 0
+                if declared_size > max_size:
+                    raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
+
+            async for chunk in response.content.iter_chunked(64 * 1024):
+                total_size += len(chunk)
+                if total_size > max_size:
+                    raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
+                chunks.append(chunk)
+
+            return b"".join(chunks), response.headers.get("Content-Type", "")
+
+
 async def _download_max_waybill(message) -> dict:
     body = getattr(message, "body", None)
     attachments = list(getattr(body, "attachments", None) or [])
@@ -302,16 +338,12 @@ async def _download_max_waybill(message) -> dict:
         raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
 
     file_name = _attachment_file_name(attachment, url)
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        downloaded_path = await bot.download_file(url=url, destination=tmp_dir)
-        file_bytes = Path(downloaded_path).read_bytes()
-        if not file_name:
-            file_name = Path(downloaded_path).name
+    token = _attachment_payload_token(attachment)
+    file_bytes, response_content_type = await _download_max_attachment_bytes(url, token, max_size)
 
-    if len(file_bytes) > max_size:
-        raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
-
-    content_type = mimetypes.guess_type(file_name)[0] or ""
+    content_type = (
+        mimetypes.guess_type(file_name)[0] or response_content_type.split(";", 1)[0]
+    )
     detected_content_type = _detect_waybill_content_type(file_name, content_type, file_bytes)
     if not _is_supported_waybill_type(file_name, detected_content_type):
         raise ValueError("Можно загрузить только картинку или PDF.")
