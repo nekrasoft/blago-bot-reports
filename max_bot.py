@@ -4,12 +4,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import mimetypes
 import os
 import re
 import sys
+import tempfile
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
@@ -39,6 +42,8 @@ from map_client import (
     record_pickup_by_bunker_id,
 )
 from sheets_client import append_rows
+from waybill_files_db import save_waybill_file
+from waybill_notes import format_note_with_waybill_token, generate_waybill_token
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -69,6 +74,7 @@ class BunkerDialog(StatesGroup):
 class HodkaDialog(StatesGroup):
     selecting = State()
     waiting_count = State()
+    waiting_file = State()
 
 
 def _build_bunker_keyboard_max(
@@ -129,7 +135,12 @@ def _load_trip_operation() -> dict:
         return default
 
 
-def _build_trip_row(contractor: str, trips_count: int, date_str: str) -> dict:
+def _build_trip_row(
+    contractor: str,
+    trips_count: int,
+    date_str: str,
+    note: str = "",
+) -> dict:
     """Строка для таблицы: ходка/рейс (trip_removal)."""
     try:
         dt = datetime.strptime(date_str, "%d.%m.%Y")
@@ -145,7 +156,7 @@ def _build_trip_row(contractor: str, trips_count: int, date_str: str) -> dict:
         "Операция": op.get("операция", "Поступление по основной деятельности"),
         "КСЗ": op.get("ксз", "1001"),
         "Контрагент": contractor,
-        "Примечание": "",
+        "Примечание": note,
         "Объект": str(trips_count),
     }
 
@@ -185,6 +196,179 @@ def _build_hodka_keyboard_max(
 
     builder.row(CallbackButton(text="Отмена", payload="hcancel"))
     return builder.as_markup(), page, total_pages
+
+
+WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT = 10 * 1024 * 1024
+WAYBILL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+
+
+def _build_waybill_keyboard_max() -> object:
+    builder = InlineKeyboardBuilder()
+    builder.row(CallbackButton(text="Пропустить путевой лист", payload="hfile_skip"))
+    builder.row(CallbackButton(text="Отмена", payload="hcancel"))
+    return builder.as_markup()
+
+
+def _get_waybill_max_file_size_bytes() -> int:
+    raw = os.environ.get("WAYBILL_MAX_FILE_SIZE_BYTES", "").strip()
+    if not raw:
+        return WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT
+    return value if value > 0 else WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT
+
+
+def _is_supported_waybill_type(file_name: str | None, content_type: str | None) -> bool:
+    content_type = (content_type or "").lower()
+    suffix = Path(file_name or "").suffix.lower()
+    return (
+        content_type == "application/pdf"
+        or content_type.startswith("image/")
+        or suffix == ".pdf"
+        or suffix in WAYBILL_IMAGE_EXTENSIONS
+    )
+
+
+def _detect_waybill_content_type(
+    file_name: str | None,
+    content_type: str | None,
+    file_bytes: bytes,
+) -> str | None:
+    if file_bytes.startswith(b"%PDF"):
+        return "application/pdf"
+    if file_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if file_bytes.startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    guessed, _ = mimetypes.guess_type(file_name or "")
+    return content_type or guessed
+
+
+def _attachment_type_text(attachment: object) -> str:
+    raw = getattr(attachment, "type", "") or ""
+    value = getattr(raw, "value", raw)
+    return str(value).strip().lower()
+
+
+def _attachment_payload_url(attachment: object) -> str:
+    payload = getattr(attachment, "payload", None)
+    return str(getattr(payload, "url", "") or "").strip()
+
+
+def _attachment_payload_token(attachment: object) -> str:
+    payload = getattr(attachment, "payload", None)
+    return str(getattr(payload, "token", "") or "").strip()
+
+
+def _attachment_file_name(attachment: object, url: str) -> str:
+    file_name = str(getattr(attachment, "filename", "") or "").strip()
+    if file_name:
+        return Path(file_name).name
+    parsed_path = Path(urlparse(url).path)
+    return parsed_path.name
+
+
+def _select_max_waybill_attachment(attachments: list[object]) -> object | None:
+    for attachment in attachments:
+        type_text = _attachment_type_text(attachment)
+        url = _attachment_payload_url(attachment)
+        if not url:
+            continue
+        file_name = _attachment_file_name(attachment, url)
+        if type_text == "image":
+            return attachment
+        if type_text == "file" and _is_supported_waybill_type(file_name, None):
+            return attachment
+    return None
+
+
+async def _download_max_waybill(message) -> dict:
+    body = getattr(message, "body", None)
+    attachments = list(getattr(body, "attachments", None) or [])
+    attachment = _select_max_waybill_attachment(attachments)
+    if attachment is None:
+        raise ValueError("Загрузите картинку или PDF с путевым листом.")
+
+    max_size = _get_waybill_max_file_size_bytes()
+    url = _attachment_payload_url(attachment)
+    file_size = int(getattr(attachment, "size", 0) or 0)
+    if file_size and file_size > max_size:
+        raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
+
+    file_name = _attachment_file_name(attachment, url)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        downloaded_path = await bot.download_file(url=url, destination=tmp_dir)
+        file_bytes = Path(downloaded_path).read_bytes()
+        if not file_name:
+            file_name = Path(downloaded_path).name
+
+    if len(file_bytes) > max_size:
+        raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
+
+    content_type = mimetypes.guess_type(file_name)[0] or ""
+    detected_content_type = _detect_waybill_content_type(file_name, content_type, file_bytes)
+    if not _is_supported_waybill_type(file_name, detected_content_type):
+        raise ValueError("Можно загрузить только картинку или PDF.")
+
+    return {
+        "file_bytes": file_bytes,
+        "file_name": file_name,
+        "content_type": detected_content_type,
+        "source_file_id": _attachment_payload_token(attachment) or url,
+    }
+
+
+def _max_chat_id(event: MessageCreated) -> int | None:
+    value = getattr(event, "chat_id", None)
+    if value is not None:
+        return value
+    recipient = getattr(event.message, "recipient", None)
+    return getattr(recipient, "chat_id", None)
+
+
+def _max_user_id(event: MessageCreated) -> int | None:
+    sender = getattr(event.message, "sender", None)
+    return getattr(sender, "user_id", None)
+
+
+def _max_message_id(event: MessageCreated) -> str | None:
+    body = getattr(event.message, "body", None)
+    return getattr(body, "mid", None)
+
+
+async def _append_hodka_report_max(
+    event: MessageCreated | MessageCallback,
+    context: MemoryContext,
+    *,
+    waybill_token: str | None,
+) -> None:
+    data = await context.get_data()
+    contractor = str(data.get("hodka_selected_contractor") or "").strip()
+    trips_count = data.get("hodka_trips_count")
+    date_str = str(data.get("hodka_date_str") or "").strip()
+    if not contractor or not trips_count or not date_str:
+        await context.clear()
+        await event.message.answer("Данные отчёта устарели. Запустите /h заново.")
+        return
+
+    note = format_note_with_waybill_token("", waybill_token) if waybill_token else ""
+    row = _build_trip_row(contractor, int(trips_count), date_str, note)
+
+    try:
+        append_rows([row])
+    except Exception as e:
+        await event.message.answer(f"Ошибка записи в таблицу: {e}")
+        return
+
+    await context.clear()
+    suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
+    await event.message.answer(text=f"Записано: {contractor}, ходок: {trips_count}.{suffix}")
 
 
 bot = Bot(token=os.environ.get("MAX_BOT_TOKEN", ""))
@@ -244,6 +428,9 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
         hodka_counterparties=counterparties,
         hodka_selected_contractor="",
         hodka_page=0,
+        hodka_trips_count=None,
+        hodka_date_str="",
+        hodka_waybill_token="",
     )
 
     markup, _, _ = _build_hodka_keyboard_max(counterparties, 0)
@@ -507,16 +694,89 @@ async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> N
         return
 
     date_str = datetime.now().strftime("%d.%m.%Y")
-    row = _build_trip_row(contractor, trips_count, date_str)
+    await context.set_state(HodkaDialog.waiting_file)
+    await context.update_data(
+        hodka_trips_count=trips_count,
+        hodka_date_str=date_str,
+        hodka_waybill_token=generate_waybill_token(),
+    )
+    await event.message.answer(
+        text=(
+            "Загрузите путевой лист: фото или PDF подписанной мастером бумаги.\n"
+            "Если путевого листа нет, нажмите «Пропустить путевой лист»."
+        ),
+        attachments=[_build_waybill_keyboard_max()],
+    )
 
-    try:
-        append_rows([row])
-    except Exception as e:
-        await event.message.answer(f"Ошибка записи в таблицу: {e}")
+
+@dp.message_callback(HodkaDialog.waiting_file)
+async def handle_hodka_file_callback(event: MessageCallback, context: MemoryContext) -> None:
+    """Обработка кнопок на этапе загрузки путевого листа."""
+    payload = event.callback.payload or ""
+    if payload == "hcancel":
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer(text="Отменено.")
+        return
+    if payload != "hfile_skip":
         return
 
-    await context.clear()
-    await event.message.answer(text=f"Записано: {contractor}, ходок: {trips_count}.")
+    await event.message.delete()
+    await event.message.answer(text="Путевой лист пропущен.")
+    await _append_hodka_report_max(event, context, waybill_token=None)
+
+
+@dp.message_created(HodkaDialog.waiting_file)
+async def handle_hodka_file(event: MessageCreated, context: MemoryContext) -> None:
+    """Приём путевого листа или отказа от загрузки."""
+    body = getattr(event.message, "body", None)
+    text = str(getattr(body, "text", "") or "").strip().lower()
+    if text in {"отмена", "cancel", "/cancel"}:
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    if text in {"нет", "не", "no", "skip", "пропустить", "без файла"}:
+        await _append_hodka_report_max(event, context, waybill_token=None)
+        return
+
+    attachments = list(getattr(body, "attachments", None) or [])
+    if not attachments:
+        await event.message.answer(
+            text="Отправьте фото или PDF путевого листа либо нажмите «Пропустить путевой лист».",
+            attachments=[_build_waybill_keyboard_max()],
+        )
+        return
+
+    data = await context.get_data()
+    token = str(data.get("hodka_waybill_token") or "").strip()
+    if not token:
+        token = generate_waybill_token()
+        await context.update_data(hodka_waybill_token=token)
+
+    try:
+        file_info = await _download_max_waybill(event.message)
+        save_waybill_file(
+            file_token=token,
+            source="max",
+            file_bytes=file_info["file_bytes"],
+            source_chat_id=_max_chat_id(event),
+            source_user_id=_max_user_id(event),
+            source_message_id=_max_message_id(event),
+            source_file_id=file_info["source_file_id"],
+            file_name=file_info["file_name"],
+            content_type=file_info["content_type"],
+        )
+    except ValueError as e:
+        await event.message.answer(str(e))
+        return
+    except Exception as e:
+        await event.message.answer(
+            "Не удалось сохранить путевой лист в БД. "
+            f"Попробуйте отправить файл ещё раз или пропустите его. Ошибка: {e}"
+        )
+        return
+
+    await _append_hodka_report_max(event, context, waybill_token=token)
 
 
 def main() -> None:

@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import mimetypes
+import os
 import re
+from io import BytesIO
 from datetime import datetime
 from pathlib import Path
 
@@ -19,18 +22,27 @@ from telegram.ext import (
 
 from map_client import get_trip_removal_counterparties
 from sheets_client import append_rows
+from waybill_files_db import save_waybill_file
+from waybill_notes import format_note_with_waybill_token, generate_waybill_token
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 OPERATIONS_PATH = PROJECT_ROOT / "data" / "operations.json"
 
 STATE_HODKA_SELECT = 0
 STATE_HODKA_COUNT = 1
+STATE_HODKA_FILE = 2
 HODKA_CANCEL = "hcancel"
+HODKA_SKIP_FILE = "hfile_skip"
+WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT = 10 * 1024 * 1024
+WAYBILL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 
 def _clear_hodka_data(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("hodka_counterparties", None)
     context.user_data.pop("hodka_selected_contractor", None)
+    context.user_data.pop("hodka_trips_count", None)
+    context.user_data.pop("hodka_date_str", None)
+    context.user_data.pop("hodka_waybill_token", None)
 
 
 def _load_trip_operation() -> dict:
@@ -48,7 +60,12 @@ def _load_trip_operation() -> dict:
         return default
 
 
-def _build_trip_row(contractor: str, trips_count: int, date_str: str) -> dict:
+def _build_trip_row(
+    contractor: str,
+    trips_count: int,
+    date_str: str,
+    note: str = "",
+) -> dict:
     """Строка для таблицы: ходка/рейс (trip_removal)."""
     try:
         dt = datetime.strptime(date_str, "%d.%m.%Y")
@@ -64,7 +81,7 @@ def _build_trip_row(contractor: str, trips_count: int, date_str: str) -> dict:
         "Операция": op.get("операция", "Поступление по основной деятельности"),
         "КСЗ": op.get("ксз", "1001"),
         "Контрагент": contractor,
-        "Примечание": "",
+        "Примечание": note,
         "Объект": str(trips_count),
     }
 
@@ -85,12 +102,148 @@ def _build_hodka_keyboard(counterparties: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def _build_waybill_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Пропустить путевой лист", callback_data=HODKA_SKIP_FILE)],
+            [InlineKeyboardButton("Отмена", callback_data=HODKA_CANCEL)],
+        ]
+    )
+
+
 def _parse_trips_count(text: str) -> int | None:
     m = re.search(r"\d+", text or "")
     if not m:
         return None
     value = int(m.group(0))
     return value if value > 0 else None
+
+
+def _get_waybill_max_file_size_bytes() -> int:
+    raw = os.environ.get("WAYBILL_MAX_FILE_SIZE_BYTES", "").strip()
+    if not raw:
+        return WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT
+    try:
+        value = int(raw)
+    except ValueError:
+        return WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT
+    return value if value > 0 else WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT
+
+
+def _is_supported_waybill_type(file_name: str | None, content_type: str | None) -> bool:
+    content_type = (content_type or "").lower()
+    suffix = Path(file_name or "").suffix.lower()
+    return (
+        content_type == "application/pdf"
+        or content_type.startswith("image/")
+        or suffix == ".pdf"
+        or suffix in WAYBILL_IMAGE_EXTENSIONS
+    )
+
+
+def _detect_waybill_content_type(
+    file_name: str | None,
+    content_type: str | None,
+    file_bytes: bytes,
+) -> str | None:
+    if file_bytes.startswith(b"%PDF"):
+        return "application/pdf"
+    if file_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if file_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if file_bytes.startswith(b"GIF87a") or file_bytes.startswith(b"GIF89a"):
+        return "image/gif"
+    if file_bytes.startswith(b"RIFF") and file_bytes[8:12] == b"WEBP":
+        return "image/webp"
+    guessed, _ = mimetypes.guess_type(file_name or "")
+    return content_type or guessed
+
+
+async def _download_telegram_waybill(message) -> dict:
+    max_size = _get_waybill_max_file_size_bytes()
+    source_file_id = ""
+    file_name = ""
+    content_type = ""
+    file_size = 0
+
+    if message.photo:
+        attachment = message.photo[-1]
+        source_file_id = attachment.file_id
+        file_unique_id = getattr(attachment, "file_unique_id", "") or source_file_id
+        file_name = f"waybill_{file_unique_id}.jpg"
+        content_type = "image/jpeg"
+        file_size = int(getattr(attachment, "file_size", 0) or 0)
+    elif message.document:
+        attachment = message.document
+        source_file_id = attachment.file_id
+        file_name = attachment.file_name or f"waybill_{attachment.file_unique_id}"
+        content_type = attachment.mime_type or mimetypes.guess_type(file_name)[0] or ""
+        file_size = int(getattr(attachment, "file_size", 0) or 0)
+        if not _is_supported_waybill_type(file_name, content_type):
+            raise ValueError("Можно загрузить только картинку или PDF.")
+    else:
+        raise ValueError("Загрузите картинку или PDF с путевым листом.")
+
+    if file_size and file_size > max_size:
+        raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
+
+    telegram_file = await attachment.get_file()
+    buffer = BytesIO()
+    await telegram_file.download_to_memory(buffer)
+    file_bytes = buffer.getvalue()
+    if len(file_bytes) > max_size:
+        raise ValueError(f"Файл слишком большой. Лимит: {max_size // (1024 * 1024)} МБ.")
+
+    detected_content_type = _detect_waybill_content_type(file_name, content_type, file_bytes)
+    if not _is_supported_waybill_type(file_name, detected_content_type):
+        raise ValueError("Можно загрузить только картинку или PDF.")
+
+    return {
+        "file_bytes": file_bytes,
+        "file_name": file_name,
+        "content_type": detected_content_type,
+        "source_file_id": source_file_id,
+    }
+
+
+async def _send_hodka_text(update: Update, text: str) -> None:
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(text)
+    elif update.message:
+        await update.message.reply_text(text)
+
+
+async def _append_hodka_report(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    waybill_token: str | None,
+) -> int:
+    contractor = (context.user_data.get("hodka_selected_contractor") or "").strip()
+    trips_count = context.user_data.get("hodka_trips_count")
+    date_str = (context.user_data.get("hodka_date_str") or "").strip()
+    if not contractor or not trips_count or not date_str:
+        _clear_hodka_data(context)
+        await _send_hodka_text(update, "Данные отчёта устарели. Запустите /h заново.")
+        return ConversationHandler.END
+
+    note = format_note_with_waybill_token("", waybill_token) if waybill_token else ""
+    row = _build_trip_row(contractor, int(trips_count), date_str, note)
+
+    try:
+        append_rows([row])
+    except Exception as e:
+        await _send_hodka_text(update, f"Ошибка записи в таблицу: {e}")
+        return STATE_HODKA_FILE
+
+    _clear_hodka_data(context)
+    suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
+    await _send_hodka_text(
+        update,
+        f"Записано: {contractor}, ходок: {trips_count}.{suffix}",
+    )
+    return ConversationHandler.END
 
 
 async def hodka_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -177,19 +330,91 @@ async def hodka_save_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return ConversationHandler.END
 
     date_str = datetime.now().strftime("%d.%m.%Y")
-    row = _build_trip_row(contractor, trips_count, date_str)
+    context.user_data["hodka_trips_count"] = trips_count
+    context.user_data["hodka_date_str"] = date_str
+    context.user_data["hodka_waybill_token"] = generate_waybill_token()
+    await update.message.reply_text(
+        "Загрузите путевой лист: фото или PDF подписанной мастером бумаги.\n"
+        "Если путевого листа нет, нажмите «Пропустить путевой лист».",
+        reply_markup=_build_waybill_keyboard(),
+    )
+    return STATE_HODKA_FILE
+
+
+async def hodka_skip_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return STATE_HODKA_FILE
+    await query.answer()
+
+    data = query.data or ""
+    if data == HODKA_CANCEL:
+        _clear_hodka_data(context)
+        await query.edit_message_text("Отменено.")
+        return ConversationHandler.END
+    if data != HODKA_SKIP_FILE:
+        return STATE_HODKA_FILE
+
+    await query.edit_message_text("Путевой лист пропущен.")
+    return await _append_hodka_report(update, context, waybill_token=None)
+
+
+async def hodka_save_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message:
+        return STATE_HODKA_FILE
+
+    token = (context.user_data.get("hodka_waybill_token") or "").strip()
+    if not token:
+        token = generate_waybill_token()
+        context.user_data["hodka_waybill_token"] = token
 
     try:
-        append_rows([row])
+        file_info = await _download_telegram_waybill(update.message)
+        save_waybill_file(
+            file_token=token,
+            source="telegram",
+            file_bytes=file_info["file_bytes"],
+            source_chat_id=update.effective_chat.id if update.effective_chat else None,
+            source_user_id=update.effective_user.id if update.effective_user else None,
+            source_message_id=update.message.message_id,
+            source_file_id=file_info["source_file_id"],
+            file_name=file_info["file_name"],
+            content_type=file_info["content_type"],
+        )
+    except ValueError as e:
+        await update.message.reply_text(str(e))
+        return STATE_HODKA_FILE
     except Exception as e:
-        await update.message.reply_text(f"Ошибка записи в таблицу: {e}")
-        return STATE_HODKA_COUNT
+        await update.message.reply_text(
+            "Не удалось сохранить путевой лист в БД. "
+            f"Попробуйте отправить файл ещё раз или пропустите его. Ошибка: {e}"
+        )
+        return STATE_HODKA_FILE
 
-    _clear_hodka_data(context)
+    return await _append_hodka_report(update, context, waybill_token=token)
+
+
+async def hodka_file_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message:
+        return STATE_HODKA_FILE
+    text = (update.message.text or "").strip().lower()
+    if text in {"отмена", "cancel", "/cancel"}:
+        _clear_hodka_data(context)
+        await update.message.reply_text("Отменено.")
+        return ConversationHandler.END
+    if text in {"нет", "не", "no", "skip", "пропустить", "без файла"}:
+        return await _append_hodka_report(update, context, waybill_token=None)
     await update.message.reply_text(
-        f"Записано: {contractor}, ходок: {trips_count}."
+        "Отправьте фото или PDF путевого листа либо нажмите «Пропустить путевой лист».",
+        reply_markup=_build_waybill_keyboard(),
     )
-    return ConversationHandler.END
+    return STATE_HODKA_FILE
+
+
+async def hodka_unsupported_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message:
+        await update.message.reply_text("Можно загрузить только картинку или PDF.")
+    return STATE_HODKA_FILE
 
 
 async def hodka_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -212,6 +437,18 @@ def get_hodka_conversation_handler() -> ConversationHandler:
             ],
             STATE_HODKA_COUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, hodka_save_count),
+            ],
+            STATE_HODKA_FILE: [
+                CallbackQueryHandler(
+                    hodka_skip_file,
+                    pattern=r"^(hfile_skip|hcancel)$",
+                ),
+                MessageHandler(
+                    (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
+                    hodka_save_file,
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, hodka_file_text),
+                MessageHandler(filters.ATTACHMENT & ~filters.COMMAND, hodka_unsupported_file),
             ],
         },
         fallbacks=[CommandHandler("cancel", hodka_cancel)],
