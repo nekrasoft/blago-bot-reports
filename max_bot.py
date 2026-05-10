@@ -152,10 +152,14 @@ def _build_trip_row(
         dt = datetime.now()
 
     op = _load_trip_operation()
+    structure = "ФЛ - Вывоз мусора" if _is_private_contractor(contractor) else op.get(
+        "структура",
+        "ЮЛ - Вывоз мусора",
+    )
     row = {
         "Дата": date_str,
         "Месяц": str(dt.month),
-        "Структура": op.get("структура", "ЮЛ - Вывоз мусора"),
+        "Структура": structure,
         "КСП": op.get("ксп", "1201"),
         "Операция": op.get("операция", "Поступление по основной деятельности"),
         "КСЗ": op.get("ксз", "1001"),
