@@ -130,8 +130,8 @@ def _build_volume_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton("Полный кузов 30 кубов", callback_data="hvol:30"),
-                InlineKeyboardButton("Полный кузов 36 кубов", callback_data="hvol:36"),
+                InlineKeyboardButton("Кузов 30 м3", callback_data="hvol:30"),
+                InlineKeyboardButton("Кузов 36 м3", callback_data="hvol:36"),
             ],
             [InlineKeyboardButton("Отмена", callback_data=HODKA_CANCEL)],
         ]
