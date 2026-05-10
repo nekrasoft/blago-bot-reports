@@ -76,6 +76,7 @@ class HodkaDialog(StatesGroup):
     selecting = State()
     waiting_count = State()
     waiting_volume = State()
+    waiting_cash = State()
     waiting_file = State()
 
 
@@ -142,6 +143,7 @@ def _build_trip_row(
     trips_count: int,
     date_str: str,
     note: str = "",
+    cash_income: str | None = None,
 ) -> dict:
     """Строка для таблицы: ходка/рейс (trip_removal)."""
     try:
@@ -150,7 +152,7 @@ def _build_trip_row(
         dt = datetime.now()
 
     op = _load_trip_operation()
-    return {
+    row = {
         "Дата": date_str,
         "Месяц": str(dt.month),
         "Структура": op.get("структура", "ЮЛ - Вывоз мусора"),
@@ -161,6 +163,11 @@ def _build_trip_row(
         "Примечание": note,
         "Объект": str(trips_count),
     }
+    if cash_income:
+        row["Приход"] = cash_income
+        row["Выручка"] = ""
+        row["_skip_formula_columns"] = ["Выручка"]
+    return row
 
 
 def _parse_trips_count(text: str) -> int | None:
@@ -191,6 +198,10 @@ def _format_volume(value: Decimal) -> str:
 
 def _volume_note(value: Decimal) -> str:
     return f"Объем: {_format_volume(value)} м3"
+
+
+def _is_private_contractor(contractor: str) -> bool:
+    return contractor.strip().casefold() == "частник"
 
 
 def _build_hodka_keyboard_max(
@@ -475,14 +486,27 @@ async def _append_hodka_report_max(
     contractor = str(data.get("hodka_selected_contractor") or "").strip()
     trips_count = data.get("hodka_trips_count")
     volume_note = str(data.get("hodka_volume_note") or "").strip()
+    cash_income = str(data.get("hodka_cash_income") or "").strip()
     date_str = str(data.get("hodka_date_str") or "").strip()
-    if not contractor or not trips_count or not volume_note or not date_str:
+    if (
+        not contractor
+        or not trips_count
+        or not volume_note
+        or not date_str
+        or (_is_private_contractor(contractor) and not cash_income)
+    ):
         await context.clear()
         await event.message.answer("Данные отчёта устарели. Запустите /h заново.")
         return
 
     note = format_note_with_waybill_token(volume_note, waybill_token) if waybill_token else volume_note
-    row = _build_trip_row(contractor, int(trips_count), date_str, note)
+    row = _build_trip_row(
+        contractor,
+        int(trips_count),
+        date_str,
+        note,
+        cash_income=cash_income or None,
+    )
 
     try:
         append_rows([row])
@@ -556,6 +580,7 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
         hodka_page=0,
         hodka_trips_count=None,
         hodka_volume_note="",
+        hodka_cash_income="",
         hodka_date_str="",
         hodka_waybill_token="",
     )
@@ -847,6 +872,20 @@ async def _ask_waybill_max(event: MessageCreated | MessageCallback, context: Mem
     )
 
 
+async def _ask_cash_or_waybill_max(
+    event: MessageCreated | MessageCallback,
+    context: MemoryContext,
+) -> None:
+    data = await context.get_data()
+    contractor = str(data.get("hodka_selected_contractor") or "").strip()
+    if not _is_private_contractor(contractor):
+        await _ask_waybill_max(event, context)
+        return
+
+    await context.set_state(HodkaDialog.waiting_cash)
+    await event.message.answer(text="Введите сумму полученной налички:")
+
+
 @dp.message_callback(HodkaDialog.waiting_volume)
 async def handle_hodka_volume_callback(event: MessageCallback, context: MemoryContext) -> None:
     """Обработка кнопок выбора объёма для /h."""
@@ -878,7 +917,7 @@ async def handle_hodka_volume_callback(event: MessageCallback, context: MemoryCo
     await event.message.answer(
         text=f"Объём: {_format_volume(total_volume)} м3 ({_format_volume(body_volume)} м3 × {trips_count} ход.)"
     )
-    await _ask_waybill_max(event, context)
+    await _ask_cash_or_waybill_max(event, context)
 
 
 @dp.message_created(HodkaDialog.waiting_volume)
@@ -901,6 +940,26 @@ async def handle_hodka_volume(event: MessageCreated, context: MemoryContext) -> 
 
     await context.update_data(hodka_volume_note=_volume_note(volume))
     await event.message.answer(text=f"Объём: {_format_volume(volume)} м3")
+    await _ask_cash_or_waybill_max(event, context)
+
+
+@dp.message_created(HodkaDialog.waiting_cash)
+async def handle_hodka_cash(event: MessageCreated, context: MemoryContext) -> None:
+    """Приём суммы налички для частника."""
+    body = getattr(event.message, "body", None)
+    text = str(getattr(body, "text", "") or "").strip()
+    if text.lower() in {"отмена", "cancel", "/cancel"}:
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+
+    amount = _parse_volume(text)
+    if amount is None:
+        await event.message.answer("Введите сумму полученной налички, например: 10000")
+        return
+
+    await context.update_data(hodka_cash_income=_format_volume(amount))
+    await event.message.answer(text=f"Наличка: {_format_volume(amount)}")
     await _ask_waybill_max(event, context)
 
 

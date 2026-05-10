@@ -32,7 +32,8 @@ OPERATIONS_PATH = PROJECT_ROOT / "data" / "operations.json"
 STATE_HODKA_SELECT = 0
 STATE_HODKA_COUNT = 1
 STATE_HODKA_VOLUME = 2
-STATE_HODKA_FILE = 3
+STATE_HODKA_CASH = 3
+STATE_HODKA_FILE = 4
 HODKA_CANCEL = "hcancel"
 HODKA_SKIP_FILE = "hfile_skip"
 WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT = 10 * 1024 * 1024
@@ -44,6 +45,7 @@ def _clear_hodka_data(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("hodka_selected_contractor", None)
     context.user_data.pop("hodka_trips_count", None)
     context.user_data.pop("hodka_volume_note", None)
+    context.user_data.pop("hodka_cash_income", None)
     context.user_data.pop("hodka_date_str", None)
     context.user_data.pop("hodka_waybill_token", None)
 
@@ -68,6 +70,7 @@ def _build_trip_row(
     trips_count: int,
     date_str: str,
     note: str = "",
+    cash_income: str | None = None,
 ) -> dict:
     """Строка для таблицы: ходка/рейс (trip_removal)."""
     try:
@@ -76,7 +79,7 @@ def _build_trip_row(
         dt = datetime.now()
 
     op = _load_trip_operation()
-    return {
+    row = {
         "Дата": date_str,
         "Месяц": str(dt.month),
         "Структура": op.get("структура", "ЮЛ - Вывоз мусора"),
@@ -87,6 +90,11 @@ def _build_trip_row(
         "Примечание": note,
         "Объект": str(trips_count),
     }
+    if cash_income:
+        row["Приход"] = cash_income
+        row["Выручка"] = ""
+        row["_skip_formula_columns"] = ["Выручка"]
+    return row
 
 
 def _counterparty_title(item: dict) -> str:
@@ -154,6 +162,10 @@ def _format_volume(value: Decimal) -> str:
 
 def _volume_note(value: Decimal) -> str:
     return f"Объем: {_format_volume(value)} м3"
+
+
+def _is_private_contractor(contractor: str) -> bool:
+    return contractor.strip().casefold() == "частник"
 
 
 def _get_waybill_max_file_size_bytes() -> int:
@@ -260,14 +272,27 @@ async def _append_hodka_report(
     contractor = (context.user_data.get("hodka_selected_contractor") or "").strip()
     trips_count = context.user_data.get("hodka_trips_count")
     volume_note = (context.user_data.get("hodka_volume_note") or "").strip()
+    cash_income = (context.user_data.get("hodka_cash_income") or "").strip()
     date_str = (context.user_data.get("hodka_date_str") or "").strip()
-    if not contractor or not trips_count or not volume_note or not date_str:
+    if (
+        not contractor
+        or not trips_count
+        or not volume_note
+        or not date_str
+        or (_is_private_contractor(contractor) and not cash_income)
+    ):
         _clear_hodka_data(context)
         await _send_hodka_text(update, "Данные отчёта устарели. Запустите /h заново.")
         return ConversationHandler.END
 
     note = format_note_with_waybill_token(volume_note, waybill_token) if waybill_token else volume_note
-    row = _build_trip_row(contractor, int(trips_count), date_str, note)
+    row = _build_trip_row(
+        contractor,
+        int(trips_count),
+        date_str,
+        note,
+        cash_income=cash_income or None,
+    )
 
     try:
         append_rows([row])
@@ -398,6 +423,15 @@ async def _ask_waybill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return STATE_HODKA_FILE
 
 
+async def _ask_cash_or_waybill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    contractor = (context.user_data.get("hodka_selected_contractor") or "").strip()
+    if not _is_private_contractor(contractor):
+        return await _ask_waybill(update, context)
+
+    await _send_hodka_text(update, "Введите сумму полученной налички:")
+    return STATE_HODKA_CASH
+
+
 async def hodka_volume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query:
@@ -428,7 +462,7 @@ async def hodka_volume_callback(update: Update, context: ContextTypes.DEFAULT_TY
     await query.edit_message_text(
         f"Объём: {_format_volume(total_volume)} м3 ({_format_volume(body_volume)} м3 × {trips_count} ход.)"
     )
-    return await _ask_waybill(update, context)
+    return await _ask_cash_or_waybill(update, context)
 
 
 async def hodka_save_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -450,6 +484,28 @@ async def hodka_save_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     context.user_data["hodka_volume_note"] = _volume_note(volume)
     await update.message.reply_text(f"Объём: {_format_volume(volume)} м3")
+    return await _ask_cash_or_waybill(update, context)
+
+
+async def hodka_save_cash(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message:
+        return STATE_HODKA_CASH
+
+    text = (update.message.text or "").strip()
+    if text.lower() in {"отмена", "cancel", "/cancel"}:
+        _clear_hodka_data(context)
+        await update.message.reply_text("Отменено.")
+        return ConversationHandler.END
+
+    amount = _parse_volume(text)
+    if amount is None:
+        await update.message.reply_text(
+            "Введите сумму полученной налички, например: 10000"
+        )
+        return STATE_HODKA_CASH
+
+    context.user_data["hodka_cash_income"] = _format_volume(amount)
+    await update.message.reply_text(f"Наличка: {_format_volume(amount)}")
     return await _ask_waybill(update, context)
 
 
@@ -556,6 +612,9 @@ def get_hodka_conversation_handler() -> ConversationHandler:
                     pattern=r"^(hvol:(30|36)|hcancel)$",
                 ),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, hodka_save_volume),
+            ],
+            STATE_HODKA_CASH: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, hodka_save_cash),
             ],
             STATE_HODKA_FILE: [
                 CallbackQueryHandler(

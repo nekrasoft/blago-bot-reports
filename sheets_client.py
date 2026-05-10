@@ -91,18 +91,29 @@ def append_rows(rows: list[dict], sheet_url: str | None = None, sheet_name: str 
                         formulas_by_col[col_idx] = (str(cell.value), row)
                         break
 
+        row_key_col_indices = [
+            all_columns.index(c)
+            for row_dict in rows
+            for c in row_dict
+            if c in all_columns
+        ]
         update_col_indices = sorted(set(
-            formula_col_indices + [all_columns.index(c) for c in fill_columns if c in all_columns]
+            formula_col_indices
+            + [all_columns.index(c) for c in fill_columns if c in all_columns]
+            + row_key_col_indices
         ))
 
         for row_dict in rows:
             values_by_idx = {}
+            skip_formula_columns = set(row_dict.get("_skip_formula_columns", []))
             for col_idx in update_col_indices:
                 col = all_columns[col_idx]
-                if col_idx in formulas_by_col:
+                if col_idx in formulas_by_col and col not in skip_formula_columns:
                     formula, source_row = formulas_by_col[col_idx]
                     formula = formula.replace(str(source_row), str(next_row))
                     values_by_idx[col_idx] = formula
+                elif col in row_dict:
+                    values_by_idx[col_idx] = row_dict.get(col, "")
                 elif col in fill_columns:
                     values_by_idx[col_idx] = row_dict.get(col, "")
 
