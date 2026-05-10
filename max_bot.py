@@ -519,9 +519,13 @@ async def _append_hodka_report_max(
         return
 
     await context.clear()
-    suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
+    if _is_private_contractor(contractor):
+        suffix = ""
+    else:
+        suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
+    cash_text = f", наличка: {cash_income}" if cash_income else ""
     await event.message.answer(
-        text=f"Записано: {contractor}, ходок: {trips_count}, {volume_note}.{suffix}"
+        text=f"Записано: {contractor}, ходок: {trips_count}, {volume_note}{cash_text}.{suffix}"
     )
 
 
@@ -964,7 +968,7 @@ async def handle_hodka_cash(event: MessageCreated, context: MemoryContext) -> No
 
     await context.update_data(hodka_cash_income=_format_volume(amount))
     await event.message.answer(text=f"Наличка: {_format_volume(amount)}")
-    await _ask_waybill_max(event, context)
+    await _append_hodka_report_max(event, context, waybill_token=None)
 
 
 @dp.message_callback(HodkaDialog.waiting_file)

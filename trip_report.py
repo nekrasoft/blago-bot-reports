@@ -305,10 +305,14 @@ async def _append_hodka_report(
         return STATE_HODKA_FILE
 
     _clear_hodka_data(context)
-    suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
+    if _is_private_contractor(contractor):
+        suffix = ""
+    else:
+        suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
+    cash_text = f", наличка: {cash_income}" if cash_income else ""
     await _send_hodka_text(
         update,
-        f"Записано: {contractor}, ходок: {trips_count}, {volume_note}.{suffix}",
+        f"Записано: {contractor}, ходок: {trips_count}, {volume_note}{cash_text}.{suffix}",
     )
     return ConversationHandler.END
 
@@ -510,7 +514,7 @@ async def hodka_save_cash(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     context.user_data["hodka_cash_income"] = _format_volume(amount)
     await update.message.reply_text(f"Наличка: {_format_volume(amount)}")
-    return await _ask_waybill(update, context)
+    return await _append_hodka_report(update, context, waybill_token=None)
 
 
 async def hodka_skip_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
