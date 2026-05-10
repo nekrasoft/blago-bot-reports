@@ -10,6 +10,7 @@ import re
 import sys
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -74,6 +75,7 @@ class BunkerDialog(StatesGroup):
 class HodkaDialog(StatesGroup):
     selecting = State()
     waiting_count = State()
+    waiting_volume = State()
     waiting_file = State()
 
 
@@ -169,6 +171,28 @@ def _parse_trips_count(text: str) -> int | None:
     return value if value > 0 else None
 
 
+def _parse_volume(text: str) -> Decimal | None:
+    match = re.search(r"\d+(?:[,.]\d+)?", text or "")
+    if not match:
+        return None
+    try:
+        value = Decimal(match.group(0).replace(",", "."))
+    except InvalidOperation:
+        return None
+    return value if value > 0 else None
+
+
+def _format_volume(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == normalized.to_integral():
+        return str(normalized.quantize(Decimal("1")))
+    return format(normalized, "f").rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _volume_note(value: Decimal) -> str:
+    return f"Объем: {_format_volume(value)} м3"
+
+
 def _build_hodka_keyboard_max(
     counterparties: list[dict], page: int = 0
 ) -> tuple[object, int, int]:
@@ -205,6 +229,16 @@ WAYBILL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".
 def _build_waybill_keyboard_max() -> object:
     builder = InlineKeyboardBuilder()
     builder.row(CallbackButton(text="Пропустить путевой лист", payload="hfile_skip"))
+    builder.row(CallbackButton(text="Отмена", payload="hcancel"))
+    return builder.as_markup()
+
+
+def _build_volume_keyboard_max() -> object:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        CallbackButton(text="Полный кузов 30 кубов", payload="hvol:30"),
+        CallbackButton(text="Полный кузов 36 кубов", payload="hvol:36"),
+    )
     builder.row(CallbackButton(text="Отмена", payload="hcancel"))
     return builder.as_markup()
 
@@ -440,13 +474,14 @@ async def _append_hodka_report_max(
     data = await context.get_data()
     contractor = str(data.get("hodka_selected_contractor") or "").strip()
     trips_count = data.get("hodka_trips_count")
+    volume_note = str(data.get("hodka_volume_note") or "").strip()
     date_str = str(data.get("hodka_date_str") or "").strip()
-    if not contractor or not trips_count or not date_str:
+    if not contractor or not trips_count or not volume_note or not date_str:
         await context.clear()
         await event.message.answer("Данные отчёта устарели. Запустите /h заново.")
         return
 
-    note = format_note_with_waybill_token("", waybill_token) if waybill_token else ""
+    note = format_note_with_waybill_token(volume_note, waybill_token) if waybill_token else volume_note
     row = _build_trip_row(contractor, int(trips_count), date_str, note)
 
     try:
@@ -457,7 +492,9 @@ async def _append_hodka_report_max(
 
     await context.clear()
     suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
-    await event.message.answer(text=f"Записано: {contractor}, ходок: {trips_count}.{suffix}")
+    await event.message.answer(
+        text=f"Записано: {contractor}, ходок: {trips_count}, {volume_note}.{suffix}"
+    )
 
 
 bot = Bot(token=os.environ.get("MAX_BOT_TOKEN", ""))
@@ -518,6 +555,7 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
         hodka_selected_contractor="",
         hodka_page=0,
         hodka_trips_count=None,
+        hodka_volume_note="",
         hodka_date_str="",
         hodka_waybill_token="",
     )
@@ -759,7 +797,7 @@ async def handle_hodka_callback(event: MessageCallback, context: MemoryContext) 
 
 @dp.message_created(HodkaDialog.waiting_count)
 async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> None:
-    """Приём количества ходок и запись строки trip_removal в Google Sheets."""
+    """Приём количества ходок и переход к выбору объёма."""
     body = getattr(event.message, "body", None)
     text = str(getattr(body, "text", "") or "").strip()
     if text.lower() in {"отмена", "cancel", "/cancel"}:
@@ -783,12 +821,23 @@ async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> N
         return
 
     date_str = datetime.now().strftime("%d.%m.%Y")
-    await context.set_state(HodkaDialog.waiting_file)
+    await context.set_state(HodkaDialog.waiting_volume)
     await context.update_data(
         hodka_trips_count=trips_count,
         hodka_date_str=date_str,
         hodka_waybill_token=generate_waybill_token(),
     )
+    await event.message.answer(
+        text="Выберите кузов или введите общий объём вывезенного мусора вручную:",
+        attachments=[_build_volume_keyboard_max()],
+    )
+
+
+async def _ask_waybill_max(event: MessageCreated | MessageCallback, context: MemoryContext) -> None:
+    data = await context.get_data()
+    if not str(data.get("hodka_waybill_token") or "").strip():
+        await context.update_data(hodka_waybill_token=generate_waybill_token())
+    await context.set_state(HodkaDialog.waiting_file)
     await event.message.answer(
         text=(
             "Загрузите путевой лист: фото или PDF подписанной мастером бумаги.\n"
@@ -796,6 +845,63 @@ async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> N
         ),
         attachments=[_build_waybill_keyboard_max()],
     )
+
+
+@dp.message_callback(HodkaDialog.waiting_volume)
+async def handle_hodka_volume_callback(event: MessageCallback, context: MemoryContext) -> None:
+    """Обработка кнопок выбора объёма для /h."""
+    payload = event.callback.payload or ""
+    if payload == "hcancel":
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer(text="Отменено.")
+        return
+    if not payload.startswith("hvol:"):
+        return
+
+    data = await context.get_data()
+    trips_count = data.get("hodka_trips_count")
+    if not trips_count:
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer("Данные отчёта устарели. Запустите /h заново.")
+        return
+
+    body_volume = _parse_volume(payload.replace("hvol:", "", 1))
+    if body_volume is None:
+        await event.message.answer("Некорректный объём. Попробуйте снова.")
+        return
+
+    total_volume = body_volume * int(trips_count)
+    await context.update_data(hodka_volume_note=_volume_note(total_volume))
+    await event.message.delete()
+    await event.message.answer(
+        text=f"Объём: {_format_volume(total_volume)} м3 ({_format_volume(body_volume)} м3 × {trips_count} ход.)"
+    )
+    await _ask_waybill_max(event, context)
+
+
+@dp.message_created(HodkaDialog.waiting_volume)
+async def handle_hodka_volume(event: MessageCreated, context: MemoryContext) -> None:
+    """Приём ручного итогового объёма для /h."""
+    body = getattr(event.message, "body", None)
+    text = str(getattr(body, "text", "") or "").strip()
+    if text.lower() in {"отмена", "cancel", "/cancel"}:
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+
+    volume = _parse_volume(text)
+    if volume is None:
+        await event.message.answer(
+            "Выберите кузов кнопкой или введите общий объём, например: 10",
+            attachments=[_build_volume_keyboard_max()],
+        )
+        return
+
+    await context.update_data(hodka_volume_note=_volume_note(volume))
+    await event.message.answer(text=f"Объём: {_format_volume(volume)} м3")
+    await _ask_waybill_max(event, context)
 
 
 @dp.message_callback(HodkaDialog.waiting_file)

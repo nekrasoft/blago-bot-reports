@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,8 @@ OPERATIONS_PATH = PROJECT_ROOT / "data" / "operations.json"
 
 STATE_HODKA_SELECT = 0
 STATE_HODKA_COUNT = 1
-STATE_HODKA_FILE = 2
+STATE_HODKA_VOLUME = 2
+STATE_HODKA_FILE = 3
 HODKA_CANCEL = "hcancel"
 HODKA_SKIP_FILE = "hfile_skip"
 WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT = 10 * 1024 * 1024
@@ -41,6 +43,7 @@ def _clear_hodka_data(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("hodka_counterparties", None)
     context.user_data.pop("hodka_selected_contractor", None)
     context.user_data.pop("hodka_trips_count", None)
+    context.user_data.pop("hodka_volume_note", None)
     context.user_data.pop("hodka_date_str", None)
     context.user_data.pop("hodka_waybill_token", None)
 
@@ -111,12 +114,46 @@ def _build_waybill_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def _build_volume_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Полный кузов 30 кубов", callback_data="hvol:30"),
+                InlineKeyboardButton("Полный кузов 36 кубов", callback_data="hvol:36"),
+            ],
+            [InlineKeyboardButton("Отмена", callback_data=HODKA_CANCEL)],
+        ]
+    )
+
+
 def _parse_trips_count(text: str) -> int | None:
     m = re.search(r"\d+", text or "")
     if not m:
         return None
     value = int(m.group(0))
     return value if value > 0 else None
+
+
+def _parse_volume(text: str) -> Decimal | None:
+    match = re.search(r"\d+(?:[,.]\d+)?", text or "")
+    if not match:
+        return None
+    try:
+        value = Decimal(match.group(0).replace(",", "."))
+    except InvalidOperation:
+        return None
+    return value if value > 0 else None
+
+
+def _format_volume(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == normalized.to_integral():
+        return str(normalized.quantize(Decimal("1")))
+    return format(normalized, "f").rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _volume_note(value: Decimal) -> str:
+    return f"Объем: {_format_volume(value)} м3"
 
 
 def _get_waybill_max_file_size_bytes() -> int:
@@ -222,13 +259,14 @@ async def _append_hodka_report(
 ) -> int:
     contractor = (context.user_data.get("hodka_selected_contractor") or "").strip()
     trips_count = context.user_data.get("hodka_trips_count")
+    volume_note = (context.user_data.get("hodka_volume_note") or "").strip()
     date_str = (context.user_data.get("hodka_date_str") or "").strip()
-    if not contractor or not trips_count or not date_str:
+    if not contractor or not trips_count or not volume_note or not date_str:
         _clear_hodka_data(context)
         await _send_hodka_text(update, "Данные отчёта устарели. Запустите /h заново.")
         return ConversationHandler.END
 
-    note = format_note_with_waybill_token("", waybill_token) if waybill_token else ""
+    note = format_note_with_waybill_token(volume_note, waybill_token) if waybill_token else volume_note
     row = _build_trip_row(contractor, int(trips_count), date_str, note)
 
     try:
@@ -241,7 +279,7 @@ async def _append_hodka_report(
     suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
     await _send_hodka_text(
         update,
-        f"Записано: {contractor}, ходок: {trips_count}.{suffix}",
+        f"Записано: {contractor}, ходок: {trips_count}, {volume_note}.{suffix}",
     )
     return ConversationHandler.END
 
@@ -312,7 +350,7 @@ async def hodka_select_counterparty(
 
 
 async def hodka_save_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Приём количества ходок и запись строки trip_removal в Google Sheets."""
+    """Приём количества ходок и переход к выбору объёма."""
     if not update.message:
         return STATE_HODKA_COUNT
 
@@ -334,11 +372,85 @@ async def hodka_save_count(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.user_data["hodka_date_str"] = date_str
     context.user_data["hodka_waybill_token"] = generate_waybill_token()
     await update.message.reply_text(
-        "Загрузите путевой лист: фото или PDF подписанной мастером бумаги.\n"
-        "Если путевого листа нет, нажмите «Пропустить путевой лист».",
-        reply_markup=_build_waybill_keyboard(),
+        "Выберите кузов или введите общий объём вывезенного мусора вручную:",
+        reply_markup=_build_volume_keyboard(),
     )
+    return STATE_HODKA_VOLUME
+
+
+async def _ask_waybill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if "hodka_waybill_token" not in context.user_data:
+        context.user_data["hodka_waybill_token"] = generate_waybill_token()
+    text = (
+        "Загрузите путевой лист: фото или PDF подписанной мастером бумаги.\n"
+        "Если путевого листа нет, нажмите «Пропустить путевой лист»."
+    )
+    if update.callback_query and update.callback_query.message:
+        await update.callback_query.message.reply_text(
+            text,
+            reply_markup=_build_waybill_keyboard(),
+        )
+    elif update.message:
+        await update.message.reply_text(
+            text,
+            reply_markup=_build_waybill_keyboard(),
+        )
     return STATE_HODKA_FILE
+
+
+async def hodka_volume_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query:
+        return STATE_HODKA_VOLUME
+    await query.answer()
+
+    data = query.data or ""
+    if data == HODKA_CANCEL:
+        _clear_hodka_data(context)
+        await query.edit_message_text("Отменено.")
+        return ConversationHandler.END
+    if not data.startswith("hvol:"):
+        return STATE_HODKA_VOLUME
+
+    trips_count = context.user_data.get("hodka_trips_count")
+    if not trips_count:
+        _clear_hodka_data(context)
+        await query.edit_message_text("Данные отчёта устарели. Запустите /h заново.")
+        return ConversationHandler.END
+
+    body_volume = _parse_volume(data.replace("hvol:", "", 1))
+    if body_volume is None:
+        await query.answer("Некорректный объём.", show_alert=True)
+        return STATE_HODKA_VOLUME
+
+    total_volume = body_volume * int(trips_count)
+    context.user_data["hodka_volume_note"] = _volume_note(total_volume)
+    await query.edit_message_text(
+        f"Объём: {_format_volume(total_volume)} м3 ({_format_volume(body_volume)} м3 × {trips_count} ход.)"
+    )
+    return await _ask_waybill(update, context)
+
+
+async def hodka_save_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message:
+        return STATE_HODKA_VOLUME
+
+    text = (update.message.text or "").strip()
+    if text.lower() in {"отмена", "cancel", "/cancel"}:
+        _clear_hodka_data(context)
+        await update.message.reply_text("Отменено.")
+        return ConversationHandler.END
+
+    volume = _parse_volume(text)
+    if volume is None:
+        await update.message.reply_text(
+            "Выберите кузов кнопкой или введите общий объём, например: 10"
+        )
+        return STATE_HODKA_VOLUME
+
+    context.user_data["hodka_volume_note"] = _volume_note(volume)
+    await update.message.reply_text(f"Объём: {_format_volume(volume)} м3")
+    return await _ask_waybill(update, context)
 
 
 async def hodka_skip_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -437,6 +549,13 @@ def get_hodka_conversation_handler() -> ConversationHandler:
             ],
             STATE_HODKA_COUNT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, hodka_save_count),
+            ],
+            STATE_HODKA_VOLUME: [
+                CallbackQueryHandler(
+                    hodka_volume_callback,
+                    pattern=r"^(hvol:(30|36)|hcancel)$",
+                ),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, hodka_save_volume),
             ],
             STATE_HODKA_FILE: [
                 CallbackQueryHandler(
