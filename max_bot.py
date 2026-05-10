@@ -251,8 +251,8 @@ def _build_waybill_keyboard_max() -> object:
 def _build_volume_keyboard_max() -> object:
     builder = InlineKeyboardBuilder()
     builder.row(
-        CallbackButton(text="Кузов 30 м3", payload="hvol:30"),
-        CallbackButton(text="Кузов 36 м3", payload="hvol:36"),
+        CallbackButton(text="30 м3", payload="hvol:30"),
+        CallbackButton(text="36 м3", payload="hvol:36"),
     )
     builder.row(CallbackButton(text="Отмена", payload="hcancel"))
     return builder.as_markup()
