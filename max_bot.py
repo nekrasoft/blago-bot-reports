@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -34,6 +34,7 @@ from bunker_report import (
     _format_request_report,
     _get_sorted_bunkers,
 )
+from driver_work_time_db import get_driver_work_time, save_driver_work_time
 from map_client import (
     build_container_pickup_row,
     format_note_with_bunker_numbers,
@@ -78,6 +79,12 @@ class HodkaDialog(StatesGroup):
     waiting_volume = State()
     waiting_cash = State()
     waiting_file = State()
+
+
+class DriverTimeDialog(StatesGroup):
+    confirming_replace = State()
+    waiting_start = State()
+    waiting_end = State()
 
 
 def _build_bunker_keyboard_max(
@@ -475,9 +482,141 @@ def _max_user_id(event: MessageCreated) -> int | None:
     return getattr(sender, "user_id", None)
 
 
+def _max_user_name(event: MessageCreated) -> str | None:
+    sender = getattr(event.message, "sender", None)
+    if sender is None:
+        return None
+    if isinstance(sender, dict):
+        parts = [
+            str(sender.get("first_name") or sender.get("firstName") or "").strip(),
+            str(sender.get("last_name") or sender.get("lastName") or "").strip(),
+        ]
+        full_name = " ".join(part for part in parts if part)
+        if full_name:
+            return full_name
+        for key in (
+            "full_name",
+            "fullName",
+            "display_name",
+            "displayName",
+            "username",
+            "login",
+            "name",
+        ):
+            value = str(sender.get(key) or "").strip()
+            if value:
+                return value
+        return full_name or None
+
+    parts = [
+        str(
+            getattr(sender, "first_name", "")
+            or getattr(sender, "firstName", "")
+            or ""
+        ).strip(),
+        str(
+            getattr(sender, "last_name", "")
+            or getattr(sender, "lastName", "")
+            or ""
+        ).strip(),
+    ]
+    full_name = " ".join(part for part in parts if part)
+    if full_name:
+        return full_name
+    for attr in (
+        "full_name",
+        "fullName",
+        "display_name",
+        "displayName",
+        "username",
+        "login",
+        "name",
+    ):
+        value = str(getattr(sender, attr, "") or "").strip()
+        if value:
+            return value
+    return full_name or None
+
+
 def _max_message_id(event: MessageCreated) -> str | None:
     body = getattr(event.message, "body", None)
     return getattr(body, "mid", None)
+
+
+def _message_text(event: MessageCreated) -> str:
+    body = getattr(event.message, "body", None)
+    return str(getattr(body, "text", "") or "").strip()
+
+
+def _is_cancel_text(text: str) -> bool:
+    return text.strip().casefold() in {"отмена", "cancel", "/cancel"}
+
+
+def _is_driver_time_command(text: str) -> bool:
+    return re.fullmatch(r"/v(?:@\w+)?", text.strip(), flags=re.IGNORECASE) is not None
+
+
+def _parse_driver_time(text: str) -> time | None:
+    match = re.fullmatch(r"\s*(\d{1,2})[:.](\d{2})\s*", text or "")
+    if not match:
+        return None
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return time(hour=hour, minute=minute)
+
+
+def _time_to_minutes(value: time) -> int:
+    return value.hour * 60 + value.minute
+
+
+def _format_time(value: time) -> str:
+    return value.strftime("%H:%M")
+
+
+def _format_duration(minutes: int) -> str:
+    hours, rest = divmod(minutes, 60)
+    return f"{hours} ч {rest:02d} мин"
+
+
+def _format_driver_existing(record: dict) -> str:
+    start_value = record.get("start_time")
+    end_value = record.get("end_time")
+    duration = int(record.get("duration_minutes") or 0)
+    if isinstance(start_value, time) and isinstance(end_value, time):
+        return (
+            f"{_format_time(start_value)}-{_format_time(end_value)}, "
+            f"{_format_duration(duration)}"
+        )
+    return "запись за сегодня"
+
+
+async def _start_driver_time_dialog(
+    event: MessageCreated,
+    context: MemoryContext,
+    *,
+    replace_existing: bool,
+) -> None:
+    user_id = _max_user_id(event)
+    if user_id is None:
+        await event.message.answer("Не удалось определить ID пользователя MAX.")
+        return
+
+    work_date = datetime.now().date()
+    await context.set_state(DriverTimeDialog.waiting_start)
+    await context.update_data(
+        driver_time_user_id=str(user_id),
+        driver_time_user_name=_max_user_name(event) or "",
+        driver_time_chat_id=_max_chat_id(event),
+        driver_time_date=work_date.isoformat(),
+        driver_time_replace_existing=replace_existing,
+        driver_time_replace_pending=False,
+        driver_time_start="",
+        driver_time_raw_start="",
+        driver_time_raw_end="",
+    )
+    await event.message.answer("Введите время начала работы, например 7:25")
 
 
 async def _append_hodka_report_max(
@@ -596,6 +735,171 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
     markup, _, _ = _build_hodka_keyboard_max(counterparties, 0)
     prompt = "Команда /h (ходка/рейс).\nВыберите контрагента, для которого были сделаны ходки:"
     await event.message.answer(text=prompt, attachments=[markup])
+
+
+@dp.message_created(Command("v"))
+async def handle_driver_time_start(event: MessageCreated, context: MemoryContext) -> None:
+    """Команда /v — учёт времени работы водителя."""
+    user_id = _max_user_id(event)
+    if user_id is None:
+        await event.message.answer("Не удалось определить ID пользователя MAX.")
+        return
+
+    work_date = datetime.now().date()
+    data = await context.get_data()
+    replace_confirmed = (
+        str(data.get("driver_time_user_id") or "") == str(user_id)
+        and str(data.get("driver_time_date") or "") == work_date.isoformat()
+        and bool(data.get("driver_time_replace_pending"))
+    )
+
+    try:
+        existing = get_driver_work_time(
+            source="max",
+            source_user_id=user_id,
+            work_date=work_date,
+        )
+    except Exception as e:
+        await event.message.answer(f"Ошибка чтения БД: {e}")
+        return
+
+    if existing and not replace_confirmed:
+        await context.set_state(DriverTimeDialog.confirming_replace)
+        await context.update_data(
+            driver_time_user_id=str(user_id),
+            driver_time_user_name=_max_user_name(event) or "",
+            driver_time_chat_id=_max_chat_id(event),
+            driver_time_date=work_date.isoformat(),
+            driver_time_replace_pending=True,
+        )
+        await event.message.answer(
+            "Запись за сегодня уже есть: "
+            f"{_format_driver_existing(existing)}.\n"
+            "Отправьте /v заново для замены или /cancel для отмены."
+        )
+        return
+
+    await _start_driver_time_dialog(
+        event,
+        context,
+        replace_existing=bool(existing),
+    )
+
+
+@dp.message_created(DriverTimeDialog.confirming_replace)
+async def handle_driver_time_replace_confirm(
+    event: MessageCreated,
+    context: MemoryContext,
+) -> None:
+    """Ожидание повторной /v или отмены после найденной записи за день."""
+    text = _message_text(event)
+    if _is_cancel_text(text):
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    if _is_driver_time_command(text):
+        await _start_driver_time_dialog(event, context, replace_existing=True)
+        return
+    await event.message.answer(
+        "Отправьте /v заново для замены или /cancel для отмены."
+    )
+
+
+@dp.message_created(DriverTimeDialog.waiting_start)
+async def handle_driver_time_start_value(
+    event: MessageCreated,
+    context: MemoryContext,
+) -> None:
+    """Приём времени начала работы."""
+    text = _message_text(event)
+    if _is_cancel_text(text):
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+
+    start_time = _parse_driver_time(text)
+    if start_time is None:
+        await event.message.answer("Введите время начала в формате 7:25")
+        return
+
+    await context.set_state(DriverTimeDialog.waiting_end)
+    await context.update_data(
+        driver_time_start=_format_time(start_time),
+        driver_time_raw_start=text,
+    )
+    await event.message.answer("Введите время окончания работы, например 20:30")
+
+
+@dp.message_created(DriverTimeDialog.waiting_end)
+async def handle_driver_time_end_value(
+    event: MessageCreated,
+    context: MemoryContext,
+) -> None:
+    """Приём времени окончания работы и запись в БД."""
+    text = _message_text(event)
+    if _is_cancel_text(text):
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+
+    end_time = _parse_driver_time(text)
+    if end_time is None:
+        await event.message.answer("Введите время окончания в формате 20:30")
+        return
+
+    data = await context.get_data()
+    start_time = _parse_driver_time(str(data.get("driver_time_start") or ""))
+    if start_time is None:
+        await context.clear()
+        await event.message.answer("Время начала устарело. Запустите /v заново.")
+        return
+
+    start_minutes = _time_to_minutes(start_time)
+    end_minutes = _time_to_minutes(end_time)
+    if end_minutes <= start_minutes:
+        await event.message.answer(
+            "Время окончания должно быть позже времени начала. "
+            "Введите время окончания ещё раз."
+        )
+        return
+
+    user_id = str(data.get("driver_time_user_id") or "").strip()
+    if not user_id:
+        await context.clear()
+        await event.message.answer("ID пользователя устарел. Запустите /v заново.")
+        return
+
+    try:
+        work_date = datetime.fromisoformat(
+            str(data.get("driver_time_date") or "")
+        ).date()
+    except ValueError:
+        work_date = datetime.now().date()
+
+    duration_minutes = end_minutes - start_minutes
+    try:
+        save_driver_work_time(
+            source="max",
+            source_chat_id=data.get("driver_time_chat_id"),
+            source_user_id=user_id,
+            source_user_name=str(data.get("driver_time_user_name") or "") or None,
+            work_date=work_date,
+            start_time=start_time,
+            end_time=end_time,
+            duration_minutes=duration_minutes,
+            raw_start_text=str(data.get("driver_time_raw_start") or ""),
+            raw_end_text=text,
+        )
+    except Exception as e:
+        await event.message.answer(f"Ошибка записи в БД: {e}")
+        return
+
+    await context.clear()
+    await event.message.answer(
+        "Учтено: "
+        f"{_format_time(start_time)}-{_format_time(end_time)}, "
+        f"{_format_duration(duration_minutes)}."
+    )
 
 
 async def _start_bunker_dialog(
