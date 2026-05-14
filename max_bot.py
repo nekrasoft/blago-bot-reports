@@ -616,7 +616,7 @@ async def _start_driver_time_dialog(
         driver_time_raw_start="",
         driver_time_raw_end="",
     )
-    await event.message.answer("Введите время начала работы, например 7:25")
+    await event.message.answer("Введите время начала работы:")
 
 
 async def _append_hodka_report_max(
@@ -827,7 +827,7 @@ async def handle_driver_time_start_value(
         driver_time_start=_format_time(start_time),
         driver_time_raw_start=text,
     )
-    await event.message.answer("Введите время окончания работы, например 20:30")
+    await event.message.answer("Введите время окончания работы:")
 
 
 @dp.message_created(DriverTimeDialog.waiting_end)
