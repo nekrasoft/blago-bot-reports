@@ -61,6 +61,42 @@ def _get_sorted_bunkers() -> list[dict]:
     )
 
 
+def _bunker_fill_level(bunker: dict) -> float:
+    """Текущая заполненность бункера из API карты."""
+    raw = (
+        bunker.get("fillLevel")
+        if "fillLevel" in bunker
+        else bunker.get("fill_level", bunker.get("filllevel", 0))
+    )
+    if raw is None:
+        return 0.0
+    if isinstance(raw, str):
+        raw = raw.strip().rstrip("%").replace(",", ".")
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _filter_bunkers_by_mode(bunkers: list[dict], mode: str) -> list[dict]:
+    """Для /z показываем <100%, для /b — только 100%."""
+    if mode == "request":
+        return [b for b in bunkers if _bunker_fill_level(b) < 100]
+    return [b for b in bunkers if _bunker_fill_level(b) == 100]
+
+
+def _get_available_bunkers(
+    mode: str = "report",
+    exclude_ids: set | frozenset | None = None,
+) -> list[dict]:
+    exclude = exclude_ids or set()
+    return [
+        b
+        for b in _filter_bunkers_by_mode(_get_sorted_bunkers(), mode)
+        if b.get("id") and b.get("id") not in exclude
+    ]
+
+
 # Типы улиц для удаления из подписи кнопки
 _STREET_TYPES = frozenset(
     w.lower()
@@ -163,11 +199,13 @@ def _format_request_report(log: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _build_bunker_keyboard(page: int = 0, exclude_ids: set | frozenset | None = None) -> InlineKeyboardMarkup:
+def _build_bunker_keyboard(
+    page: int = 0,
+    exclude_ids: set | frozenset | None = None,
+    mode: str = "report",
+) -> InlineKeyboardMarkup:
     """Клавиатура со списком бункеров. exclude_ids — уже выбранные (скрываются)."""
-    bunkers = _get_sorted_bunkers()
-    exclude = exclude_ids or set()
-    available = [b for b in bunkers if b.get("id") and b.get("id") not in exclude]
+    available = _get_available_bunkers(mode, exclude_ids)
 
     total = len(available)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -211,13 +249,22 @@ async def _bunker_start_impl(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not bunkers:
         await update.message.reply_text("Бункеры не найдены. Проверьте настройку MAP_SERVICE_URL.")
         return ConversationHandler.END
+    available = [b for b in _filter_bunkers_by_mode(bunkers, mode) if b.get("id")]
+    if not available:
+        msg = (
+            "Нет бункеров с заполненностью меньше 100%."
+            if mode == "request"
+            else "Нет бункеров со 100% заполненностью."
+        )
+        await update.message.reply_text(msg)
+        return ConversationHandler.END
 
     if mode == "request":
         prompt = "Выберите бункер для заявки на опустошение (или несколько по очереди):"
     else:
         prompt = "Выберите опустошённый бункер (или несколько по очереди):"
 
-    await update.message.reply_text(prompt, reply_markup=_build_bunker_keyboard(0, set()))
+    await update.message.reply_text(prompt, reply_markup=_build_bunker_keyboard(0, set(), mode))
     return STATE_BUNKER
 
 
@@ -249,12 +296,13 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     except ValueError:
         page = 0
 
-    context.user_data["bunker_page"] = page
     exclude = context.user_data.get("bunker_selected_ids", set())
-    available = [b for b in _get_sorted_bunkers() if b.get("id") and b.get("id") not in exclude]
-    total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
 
     mode = context.user_data.get("bunker_mode", "report")
+    available = _get_available_bunkers(mode, exclude)
+    total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    context.user_data["bunker_page"] = page
     prefix = "Принято:" if mode == "request" else "Записано:"
 
     text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
@@ -263,7 +311,7 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         preview = [f"• {_bunker_label(x)}" for x in log[-3:]]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
-    await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude))
+    await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude, mode))
     return STATE_BUNKER
 
 
@@ -361,7 +409,7 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     page = context.user_data.get("bunker_page", 0)
     preview = [f"• {_bunker_label(x)}" for x in context.user_data["bunker_log"][-5:]]
     prompt_suffix = "Выберите ещё бункер или Готово:\n\n" + "\n".join(preview)
-    await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids))
+    await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids, mode))
     return STATE_BUNKER
 
 

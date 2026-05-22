@@ -30,8 +30,10 @@ from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
 from bunker_report import (
     _bunker_label,
+    _filter_bunkers_by_mode,
     _format_bunker_report,
     _format_request_report,
+    _get_available_bunkers,
     _get_sorted_bunkers,
 )
 from driver_work_time_db import get_driver_work_time, save_driver_work_time
@@ -88,15 +90,15 @@ class DriverTimeDialog(StatesGroup):
 
 
 def _build_bunker_keyboard_max(
-    page: int = 0, exclude_ids: set | None = None
+    page: int = 0,
+    exclude_ids: set | None = None,
+    mode: str = "report",
 ) -> tuple[object, int, int]:
     """Клавиатура со списком бункеров для MAX.
 
     Возвращает (markup, page, total_pages).
     """
-    bunkers = _get_sorted_bunkers()
-    exclude = exclude_ids or set()
-    available = [b for b in bunkers if b.get("id") and b.get("id") not in exclude]
+    available = _get_available_bunkers(mode, exclude_ids)
 
     total = len(available)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -910,11 +912,20 @@ async def _start_bunker_dialog(
     if not bunkers:
         await event.message.answer("Бункеры не найдены. Проверьте настройку MAP_SERVICE_URL.")
         return
+    available = [b for b in _filter_bunkers_by_mode(bunkers, mode) if b.get("id")]
+    if not available:
+        msg = (
+            "Нет бункеров с заполненностью меньше 100%."
+            if mode == "request"
+            else "Нет бункеров со 100% заполненностью."
+        )
+        await event.message.answer(msg)
+        return
 
     await context.set_state(BunkerDialog.selecting)
     await context.update_data(mode=mode, page=0, bunker_log=[], selected_ids=[])
 
-    markup, _, _ = _build_bunker_keyboard_max(0, set())
+    markup, _, _ = _build_bunker_keyboard_max(0, set(), mode)
 
     if mode == "request":
         prompt = "Выберите бункер для заявки на опустошение (или несколько по очереди):"
@@ -1000,22 +1011,22 @@ async def _callback_page(
         page = 0
 
     data = await context.get_data()
-    await context.update_data(page=page)
-
     selected_ids = set(data.get("selected_ids", []))
     mode = data.get("mode", "report")
     bunker_log = data.get("bunker_log", [])
     prefix = "Принято:" if mode == "request" else "Записано:"
 
-    available = [b for b in _get_sorted_bunkers() if b.get("id") and b.get("id") not in selected_ids]
+    available = _get_available_bunkers(mode, selected_ids)
     total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(max(page, 0), total_pages - 1)
+    await context.update_data(page=page)
     text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
 
     if bunker_log:
         preview = [f"• {_bunker_label(x)}" for x in bunker_log[-3:]]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
-    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
+    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, mode)
     await event.message.delete()
     await event.message.answer(text=text, attachments=[markup])
 
@@ -1066,7 +1077,7 @@ async def _callback_bunker(
 
     preview = [f"• {_bunker_label(x)}" for x in bunker_log[-5:]]
     prompt_suffix = f"{answer_txt}\n\nВыберите ещё бункер или Готово:\n\n" + "\n".join(preview)
-    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids)
+    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, mode)
     await event.message.delete()
     await event.message.answer(text=prompt_suffix, attachments=[markup])
 
