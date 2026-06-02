@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -61,6 +61,7 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 8
 NOT_ALLOWED_MSG = "Извините, бот не может работать в этой группе."
 OPERATIONS_PATH = Path(__file__).resolve().parent / "data" / "operations.json"
+DRIVER_START_TIME_OPTIONS = ("08:30", "09:00", "09:30")
 
 
 def _get_allowed_chat_ids() -> set[int]:
@@ -264,6 +265,14 @@ def _build_volume_keyboard_max() -> object:
         CallbackButton(text="36 м3", payload="hvol:36"),
     )
     builder.row(CallbackButton(text="Отмена", payload="hcancel"))
+    return builder.as_markup()
+
+
+def _build_driver_time_keyboard_max(options: list[str] | tuple[str, ...], prefix: str) -> object:
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        *(CallbackButton(text=value, payload=f"{prefix}:{value}") for value in options)
+    )
     return builder.as_markup()
 
 
@@ -577,6 +586,14 @@ def _format_time(value: time) -> str:
     return value.strftime("%H:%M")
 
 
+def _get_driver_end_time_options(now: datetime) -> list[str]:
+    rounded = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
+    return [
+        (rounded - timedelta(minutes=offset)).strftime("%H:%M")
+        for offset in (20, 10, 0)
+    ]
+
+
 def _format_duration(minutes: int) -> str:
     hours, rest = divmod(minutes, 60)
     return f"{hours} ч {rest:02d} мин"
@@ -605,7 +622,9 @@ async def _start_driver_time_dialog(
         await event.message.answer("Не удалось определить ID пользователя MAX.")
         return
 
-    work_date = datetime.now().date()
+    now = datetime.now()
+    work_date = now.date()
+    end_time_options = _get_driver_end_time_options(now)
     await context.set_state(DriverTimeDialog.waiting_start)
     await context.update_data(
         driver_time_user_id=str(user_id),
@@ -617,8 +636,12 @@ async def _start_driver_time_dialog(
         driver_time_start="",
         driver_time_raw_start="",
         driver_time_raw_end="",
+        driver_time_end_options=end_time_options,
     )
-    await event.message.answer("Введите время начала работы:")
+    await event.message.answer(
+        text="Введите время начала работы:",
+        attachments=[_build_driver_time_keyboard_max(DRIVER_START_TIME_OPTIONS, "vstart")],
+    )
 
 
 async def _append_hodka_report_max(
@@ -824,12 +847,46 @@ async def handle_driver_time_start_value(
         await event.message.answer("Введите время начала в формате 7:25")
         return
 
+    await _save_driver_time_start(event, context, start_time, text)
+
+
+@dp.message_callback(DriverTimeDialog.waiting_start)
+async def handle_driver_time_start_callback(
+    event: MessageCallback,
+    context: MemoryContext,
+) -> None:
+    """Выбор времени начала работы кнопкой."""
+    payload = event.callback.payload or ""
+    if not payload.startswith("vstart:"):
+        return
+
+    text = payload.replace("vstart:", "", 1)
+    start_time = _parse_driver_time(text)
+    if start_time is None:
+        return
+
+    await event.message.delete()
+    await _save_driver_time_start(event, context, start_time, text)
+
+
+async def _save_driver_time_start(
+    event: MessageCreated | MessageCallback,
+    context: MemoryContext,
+    start_time: time,
+    raw_start_text: str,
+) -> None:
+    """Сохранение времени начала и переход к выбору времени окончания."""
     await context.set_state(DriverTimeDialog.waiting_end)
     await context.update_data(
         driver_time_start=_format_time(start_time),
-        driver_time_raw_start=text,
+        driver_time_raw_start=raw_start_text,
     )
-    await event.message.answer("Введите время окончания работы:")
+    data = await context.get_data()
+    end_time_options = data.get("driver_time_end_options", [])
+    await event.message.answer(
+        text="Введите время окончания работы:",
+        attachments=[_build_driver_time_keyboard_max(end_time_options, "vend")],
+    )
 
 
 @dp.message_created(DriverTimeDialog.waiting_end)
@@ -849,12 +906,42 @@ async def handle_driver_time_end_value(
         await event.message.answer("Введите время окончания в формате 20:30")
         return
 
+    await _save_driver_time_end(event, context, end_time, text)
+
+
+@dp.message_callback(DriverTimeDialog.waiting_end)
+async def handle_driver_time_end_callback(
+    event: MessageCallback,
+    context: MemoryContext,
+) -> None:
+    """Выбор времени окончания работы кнопкой."""
+    payload = event.callback.payload or ""
+    if not payload.startswith("vend:"):
+        return
+
+    text = payload.replace("vend:", "", 1)
+    end_time = _parse_driver_time(text)
+    if end_time is None:
+        return
+
+    saved = await _save_driver_time_end(event, context, end_time, text)
+    if saved:
+        await event.message.delete()
+
+
+async def _save_driver_time_end(
+    event: MessageCreated | MessageCallback,
+    context: MemoryContext,
+    end_time: time,
+    raw_end_text: str,
+) -> bool:
+    """Валидация и сохранение рабочего времени."""
     data = await context.get_data()
     start_time = _parse_driver_time(str(data.get("driver_time_start") or ""))
     if start_time is None:
         await context.clear()
         await event.message.answer("Время начала устарело. Запустите /v заново.")
-        return
+        return False
 
     start_minutes = _time_to_minutes(start_time)
     end_minutes = _time_to_minutes(end_time)
@@ -863,13 +950,13 @@ async def handle_driver_time_end_value(
             "Время окончания должно быть позже времени начала. "
             "Введите время окончания ещё раз."
         )
-        return
+        return False
 
     user_id = str(data.get("driver_time_user_id") or "").strip()
     if not user_id:
         await context.clear()
         await event.message.answer("ID пользователя устарел. Запустите /v заново.")
-        return
+        return False
 
     try:
         work_date = datetime.fromisoformat(
@@ -890,11 +977,11 @@ async def handle_driver_time_end_value(
             end_time=end_time,
             duration_minutes=duration_minutes,
             raw_start_text=str(data.get("driver_time_raw_start") or ""),
-            raw_end_text=text,
+            raw_end_text=raw_end_text,
         )
     except Exception as e:
         await event.message.answer(f"Ошибка записи в БД: {e}")
-        return
+        return False
 
     await context.clear()
     await event.message.answer(
@@ -902,6 +989,7 @@ async def handle_driver_time_end_value(
         f"{_format_time(start_time)}-{_format_time(end_time)}, "
         f"{_format_duration(duration_minutes)}."
     )
+    return True
 
 
 async def _start_bunker_dialog(
