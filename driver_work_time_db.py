@@ -65,6 +65,29 @@ def get_driver_work_time(
     return dict(row) if row else None
 
 
+def get_driver_work_time_total_minutes(
+    *,
+    source: str,
+    source_user_id: str | int,
+    date_from: date,
+    date_to: date,
+) -> int:
+    from sqlalchemy import func, select
+
+    _ensure_driver_work_time_table()
+    table = _get_driver_work_time_table()
+    stmt = select(func.coalesce(func.sum(table.c.duration_minutes), 0)).where(
+        table.c.source == source,
+        table.c.source_user_id == str(source_user_id),
+        table.c.work_date >= date_from,
+        table.c.work_date < date_to,
+    )
+    engine = _get_engine()
+    with engine.begin() as conn:
+        total = conn.execute(stmt).scalar_one()
+    return int(total)
+
+
 def save_driver_work_time(
     *,
     source: str,

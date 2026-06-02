@@ -41,7 +41,12 @@ from driver_time_buttons import (
     get_driver_end_time_options,
     get_driver_time_buttons,
 )
-from driver_work_time_db import get_driver_work_time, save_driver_work_time
+from driver_work_time_db import (
+    get_driver_work_time,
+    get_driver_work_time_total_minutes,
+    save_driver_work_time,
+)
+from driver_work_time_periods import get_month_range
 from map_client import (
     build_container_pickup_row,
     format_note_with_bunker_numbers,
@@ -759,6 +764,47 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
     markup, _, _ = _build_hodka_keyboard_max(counterparties, 0)
     prompt = "Команда /h (ходка/рейс).\nВыберите контрагента, для которого были сделаны ходки:"
     await event.message.answer(text=prompt, attachments=[markup])
+
+
+@dp.message_created(Command("vvv"))
+async def handle_driver_current_month_total(event: MessageCreated) -> None:
+    """Команда /vvv — суммарное время работы водителя за текущий месяц."""
+    await _send_driver_month_total(event, month_offset=0, period_name="текущий месяц")
+
+
+@dp.message_created(Command("vv"))
+async def handle_driver_previous_month_total(event: MessageCreated) -> None:
+    """Команда /vv — суммарное время работы водителя за прошлый месяц."""
+    await _send_driver_month_total(event, month_offset=-1, period_name="прошлый месяц")
+
+
+async def _send_driver_month_total(
+    event: MessageCreated,
+    *,
+    month_offset: int,
+    period_name: str,
+) -> None:
+    """Отправка суммарного времени текущего водителя за календарный месяц."""
+    user_id = _max_user_id(event)
+    if user_id is None:
+        await event.message.answer("Не удалось определить ID пользователя MAX.")
+        return
+
+    date_from, date_to = get_month_range(datetime.now().date(), month_offset)
+    try:
+        total_minutes = get_driver_work_time_total_minutes(
+            source="max",
+            source_user_id=user_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except Exception as e:
+        await event.message.answer(f"Ошибка чтения БД: {e}")
+        return
+
+    await event.message.answer(
+        f"За {period_name}: {_format_duration(total_minutes)}. ({user_id})"
+    )
 
 
 @dp.message_created(Command("v"))
