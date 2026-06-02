@@ -986,7 +986,7 @@ async def _save_driver_time_end(
     await event.message.answer(
         "Учтено: "
         f"{_format_time(start_time)}-{_format_time(end_time)}, "
-        f"{_format_duration(duration_minutes)}."
+        f"{_format_duration(duration_minutes)}. ({user_id})"
     )
     return True
 
