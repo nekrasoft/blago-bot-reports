@@ -154,6 +154,7 @@ JSON сервисного аккаунта Google по умолчанию ожи
 | [`sheets_client.py`](sheets_client.py) | Запись строк и формул в Sheets |
 | [`waybill_files_db.py`](waybill_files_db.py) | Подключение MySQL и upsert путевых листов |
 | [`driver_work_time_db.py`](driver_work_time_db.py) | Учёт рабочего времени MAX |
+| [`driver_time_buttons.py`](driver_time_buttons.py) | Варианты времени и callback payload для команды `/v` |
 | [`waybill_notes.py`](waybill_notes.py) | Генерация и разбор token путевого листа |
 | [`parser.py`](parser.py) | Не подключённый OpenAI-парсер свободного текста |
 
@@ -175,6 +176,7 @@ python run.py
 Базовая проверка после любых изменений:
 
 ```bash
+python -m unittest discover -s tests
 TMPDIR=/tmp TEMP=/tmp TMP=/tmp python -m compileall .
 ```
 
@@ -186,7 +188,7 @@ smoke test. Он делает `PUT` для первого бункера и за
 python test_map_integration.py
 ```
 
-Автоматизированных unit tests в репозитории сейчас нет.
+Unit tests находятся в каталоге [`tests`](tests).
 
 ## Известные риски и tech debt
 

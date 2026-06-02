@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -36,6 +36,11 @@ from bunker_report import (
     _get_available_bunkers,
     _get_sorted_bunkers,
 )
+from driver_time_buttons import (
+    DRIVER_START_TIME_OPTIONS,
+    get_driver_end_time_options,
+    get_driver_time_buttons,
+)
 from driver_work_time_db import get_driver_work_time, save_driver_work_time
 from map_client import (
     build_container_pickup_row,
@@ -61,7 +66,6 @@ logger = logging.getLogger(__name__)
 PAGE_SIZE = 8
 NOT_ALLOWED_MSG = "Извините, бот не может работать в этой группе."
 OPERATIONS_PATH = Path(__file__).resolve().parent / "data" / "operations.json"
-DRIVER_START_TIME_OPTIONS = ("08:30", "09:00", "09:30")
 
 
 def _get_allowed_chat_ids() -> set[int]:
@@ -271,7 +275,10 @@ def _build_volume_keyboard_max() -> object:
 def _build_driver_time_keyboard_max(options: list[str] | tuple[str, ...], prefix: str) -> object:
     builder = InlineKeyboardBuilder()
     builder.row(
-        *(CallbackButton(text=value, payload=f"{prefix}:{value}") for value in options)
+        *(
+            CallbackButton(text=text, payload=payload)
+            for text, payload in get_driver_time_buttons(options, prefix)
+        )
     )
     return builder.as_markup()
 
@@ -586,14 +593,6 @@ def _format_time(value: time) -> str:
     return value.strftime("%H:%M")
 
 
-def _get_driver_end_time_options(now: datetime) -> list[str]:
-    rounded = now.replace(minute=(now.minute // 10) * 10, second=0, microsecond=0)
-    return [
-        (rounded - timedelta(minutes=offset)).strftime("%H:%M")
-        for offset in (20, 10, 0)
-    ]
-
-
 def _format_duration(minutes: int) -> str:
     hours, rest = divmod(minutes, 60)
     return f"{hours} ч {rest:02d} мин"
@@ -624,7 +623,7 @@ async def _start_driver_time_dialog(
 
     now = datetime.now()
     work_date = now.date()
-    end_time_options = _get_driver_end_time_options(now)
+    end_time_options = get_driver_end_time_options(now)
     await context.set_state(DriverTimeDialog.waiting_start)
     await context.update_data(
         driver_time_user_id=str(user_id),
