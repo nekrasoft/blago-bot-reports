@@ -46,7 +46,7 @@ from driver_work_time_db import (
     get_driver_work_time_total_minutes,
     save_driver_work_time,
 )
-from driver_work_time_periods import get_month_range
+from driver_work_time_periods import format_month, get_month_range
 from map_client import (
     build_container_pickup_row,
     format_note_with_bunker_numbers,
@@ -803,7 +803,8 @@ async def _send_driver_month_total(
         return
 
     await event.message.answer(
-        f"За {period_name}: {_format_duration(total_minutes)}. ({user_id})"
+        f"За {period_name} ({format_month(date_from)}): "
+        f"{_format_duration(total_minutes)}. (user_id: {user_id})"
     )
 
 
@@ -1032,7 +1033,7 @@ async def _save_driver_time_end(
     await event.message.answer(
         "Учтено: "
         f"{_format_time(start_time)}-{_format_time(end_time)}, "
-        f"{_format_duration(duration_minutes)}. ({user_id})"
+        f"{_format_duration(duration_minutes)}. (user_id: {user_id})"
     )
     return True
 

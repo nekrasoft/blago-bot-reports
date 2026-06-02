@@ -12,3 +12,7 @@ def get_month_range(today: date, month_offset: int = 0) -> tuple[date, date]:
     next_year, next_zero_based_month = divmod(month_index + 1, 12)
     end = date(next_year, next_zero_based_month + 1, 1)
     return start, end
+
+
+def format_month(value: date) -> str:
+    return value.strftime("%m.%Y")
