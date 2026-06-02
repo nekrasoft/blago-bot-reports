@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from driver_time_buttons import (
     DRIVER_START_TIME_OPTIONS,
     get_driver_end_time_options,
     get_driver_time_buttons,
+    to_moscow_time,
 )
 
 
@@ -45,6 +46,24 @@ class DriverTimeButtonsTest(unittest.TestCase):
             get_driver_end_time_options(datetime(2026, 6, 2, 0, 3)),
             ["23:40", "23:50", "00:00"],
         )
+
+    def test_moscow_time_is_three_hours_ahead_of_utc(self) -> None:
+        moscow_time = to_moscow_time(
+            datetime(2026, 6, 2, 17, 43, tzinfo=timezone.utc)
+        )
+
+        self.assertEqual(
+            moscow_time,
+            datetime.fromisoformat("2026-06-02T20:43:00+03:00"),
+        )
+        self.assertEqual(
+            get_driver_end_time_options(moscow_time),
+            ["20:20", "20:30", "20:40"],
+        )
+
+    def test_moscow_time_rejects_naive_datetime(self) -> None:
+        with self.assertRaises(ValueError):
+            to_moscow_time(datetime(2026, 6, 2, 17, 43))
 
 
 if __name__ == "__main__":

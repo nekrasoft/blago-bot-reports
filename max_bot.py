@@ -40,6 +40,7 @@ from driver_time_buttons import (
     DRIVER_START_TIME_OPTIONS,
     get_driver_end_time_options,
     get_driver_time_buttons,
+    get_moscow_now,
 )
 from driver_work_time_db import (
     get_driver_work_time,
@@ -626,7 +627,7 @@ async def _start_driver_time_dialog(
         await event.message.answer("Не удалось определить ID пользователя MAX.")
         return
 
-    now = datetime.now()
+    now = get_moscow_now()
     work_date = now.date()
     end_time_options = get_driver_end_time_options(now)
     await context.set_state(DriverTimeDialog.waiting_start)
@@ -790,7 +791,7 @@ async def _send_driver_month_total(
         await event.message.answer("Не удалось определить ID пользователя MAX.")
         return
 
-    date_from, date_to = get_month_range(datetime.now().date(), month_offset)
+    date_from, date_to = get_month_range(get_moscow_now().date(), month_offset)
     try:
         total_minutes = get_driver_work_time_total_minutes(
             source="max",
@@ -816,7 +817,7 @@ async def handle_driver_time_start(event: MessageCreated, context: MemoryContext
         await event.message.answer("Не удалось определить ID пользователя MAX.")
         return
 
-    work_date = datetime.now().date()
+    work_date = get_moscow_now().date()
     data = await context.get_data()
     replace_confirmed = (
         str(data.get("driver_time_user_id") or "") == str(user_id)
@@ -1009,7 +1010,7 @@ async def _save_driver_time_end(
             str(data.get("driver_time_date") or "")
         ).date()
     except ValueError:
-        work_date = datetime.now().date()
+        work_date = get_moscow_now().date()
 
     duration_minutes = end_minutes - start_minutes
     try:
