@@ -471,11 +471,11 @@ def build_container_pickup_row(
 
 def _address_to_note(addr: str) -> str:
     """Краткое примечание из адреса (без «Киров, »)."""
-    if not addr:
-        return ""
-    if "," in addr:
-        return addr.split(",", 1)[1].strip()
-    return addr
+    address = (addr or "").strip()
+    city_prefix = "Киров,"
+    if address.casefold().startswith(city_prefix.casefold()):
+        return address[len(city_prefix) :].strip()
+    return address
 
 
 def get_bunker_log_entry(bunker_id: str) -> dict | None:
