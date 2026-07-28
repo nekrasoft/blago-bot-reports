@@ -50,8 +50,10 @@ from driver_work_time_db import (
 from driver_work_time_periods import format_month, get_month_range
 from map_client import (
     build_container_pickup_row,
+    dedupe_bunker_items,
     format_note_with_bunker_numbers,
     get_bunker_log_entry,
+    get_bunker_identity_key,
     get_trip_removal_counterparties,
     mark_bunker_filled,
     record_pickup_by_bunker_id,
@@ -103,13 +105,14 @@ class DriverTimeDialog(StatesGroup):
 def _build_bunker_keyboard_max(
     page: int = 0,
     exclude_ids: set | None = None,
+    exclude_keys: set | None = None,
     mode: str = "report",
 ) -> tuple[object, int, int]:
     """Клавиатура со списком бункеров для MAX.
 
     Возвращает (markup, page, total_pages).
     """
-    available = _get_available_bunkers(mode, exclude_ids)
+    available = _get_available_bunkers(mode, exclude_ids, exclude_keys)
 
     total = len(available)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -1058,9 +1061,15 @@ async def _start_bunker_dialog(
         return
 
     await context.set_state(BunkerDialog.selecting)
-    await context.update_data(mode=mode, page=0, bunker_log=[], selected_ids=[])
+    await context.update_data(
+        mode=mode,
+        page=0,
+        bunker_log=[],
+        selected_ids=[],
+        selected_keys=[],
+    )
 
-    markup, _, _ = _build_bunker_keyboard_max(0, set(), mode)
+    markup, _, _ = _build_bunker_keyboard_max(0, set(), set(), mode)
 
     if mode == "request":
         prompt = "Выберите бункер для заявки на опустошение (или несколько по очереди):"
@@ -1095,7 +1104,7 @@ async def _callback_cancel(event: MessageCallback, context: MemoryContext) -> No
 async def _callback_done(event: MessageCallback, context: MemoryContext) -> None:
     """Завершение выбора бункеров."""
     data = await context.get_data()
-    bunker_log = data.get("bunker_log", [])
+    bunker_log = dedupe_bunker_items(data.get("bunker_log", []))
     mode = data.get("mode", "report")
     await context.clear()
 
@@ -1147,11 +1156,12 @@ async def _callback_page(
 
     data = await context.get_data()
     selected_ids = set(data.get("selected_ids", []))
+    selected_keys = set(data.get("selected_keys", []))
     mode = data.get("mode", "report")
     bunker_log = data.get("bunker_log", [])
     prefix = "Принято:" if mode == "request" else "Записано:"
 
-    available = _get_available_bunkers(mode, selected_ids)
+    available = _get_available_bunkers(mode, selected_ids, selected_keys)
     total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = min(max(page, 0), total_pages - 1)
     await context.update_data(page=page)
@@ -1161,7 +1171,7 @@ async def _callback_page(
         preview = [f"• {_bunker_label(x)}" for x in bunker_log[-3:]]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
-    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, mode)
+    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, selected_keys, mode)
     await event.message.delete()
     await event.message.answer(text=text, attachments=[markup])
 
@@ -1179,31 +1189,38 @@ async def _callback_bunker(
     page = data.get("page", 0)
     bunker_log: list[dict] = data.get("bunker_log", [])
     selected_ids: set[str] = set(data.get("selected_ids", []))
+    selected_keys: set[str] = set(data.get("selected_keys", []))
+
+    log_entry = get_bunker_log_entry(bunker_id)
+    if not log_entry:
+        await event.message.answer("Ошибка: бункер не найден.")
+        return
+
+    bunker_key = get_bunker_identity_key(log_entry)
+    if bunker_id in selected_ids or bunker_key in selected_keys:
+        await event.message.answer("Этот бункер уже выбран.")
+        return
+
+    selected_ids.add(bunker_id)
+    selected_keys.add(bunker_key)
 
     if mode == "report":
         date_str = datetime.now().strftime("%d.%m.%Y")
         row, map_ok = record_pickup_by_bunker_id(bunker_id, date_str, 1)
         if not row:
+            selected_ids.discard(bunker_id)
+            selected_keys.discard(bunker_key)
             await event.message.answer("Ошибка: бункер не найден.")
             return
-        log_entry = get_bunker_log_entry(bunker_id)
-        if not log_entry:
-            log_entry = {
-                "contractor": row.get("Контрагент", ""),
-                "note": row.get("Примечание", ""),
-                "number": "?",
-                "address": "",
-            }
     else:
-        log_entry = get_bunker_log_entry(bunker_id)
-        if not log_entry:
-            await event.message.answer("Ошибка: бункер не найден.")
-            return
         map_ok = mark_bunker_filled(bunker_id)
 
     bunker_log.append(log_entry)
-    selected_ids.add(bunker_id)
-    await context.update_data(bunker_log=bunker_log, selected_ids=list(selected_ids))
+    await context.update_data(
+        bunker_log=bunker_log,
+        selected_ids=list(selected_ids),
+        selected_keys=list(selected_keys),
+    )
 
     if mode == "request":
         answer_txt = "Принято, карта обновлена ✓" if map_ok else "Принято ✓"
@@ -1212,7 +1229,7 @@ async def _callback_bunker(
 
     preview = [f"• {_bunker_label(x)}" for x in bunker_log[-5:]]
     prompt_suffix = f"{answer_txt}\n\nВыберите ещё бункер или Готово:\n\n" + "\n".join(preview)
-    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, mode)
+    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, selected_keys, mode)
     await event.message.delete()
     await event.message.answer(text=prompt_suffix, attachments=[markup])
 

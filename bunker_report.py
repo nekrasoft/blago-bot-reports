@@ -15,9 +15,11 @@ from telegram.ext import (
 
 from map_client import (
     build_container_pickup_row,
+    dedupe_bunker_items,
     format_note_with_bunker_numbers,
     get_all_bunkers,
     get_bunker_log_entry,
+    get_bunker_identity_key,
     mark_bunker_filled,
     record_pickup_by_bunker_id,
 )
@@ -88,13 +90,22 @@ def _filter_bunkers_by_mode(bunkers: list[dict], mode: str) -> list[dict]:
 def _get_available_bunkers(
     mode: str = "report",
     exclude_ids: set | frozenset | None = None,
+    exclude_keys: set | frozenset | None = None,
 ) -> list[dict]:
     exclude = exclude_ids or set()
-    return [
-        b
-        for b in _filter_bunkers_by_mode(_get_sorted_bunkers(), mode)
-        if b.get("id") and b.get("id") not in exclude
-    ]
+    key_exclude = exclude_keys or set()
+    result: list[dict] = []
+    seen_keys: set[str] = set()
+    for bunker in _filter_bunkers_by_mode(_get_sorted_bunkers(), mode):
+        bunker_id = bunker.get("id")
+        if not bunker_id or bunker_id in exclude:
+            continue
+        key = get_bunker_identity_key(bunker)
+        if key in key_exclude or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        result.append(bunker)
+    return result
 
 
 # Типы улиц для удаления из подписи кнопки
@@ -202,10 +213,11 @@ def _format_request_report(log: list[dict]) -> str:
 def _build_bunker_keyboard(
     page: int = 0,
     exclude_ids: set | frozenset | None = None,
+    exclude_keys: set | frozenset | None = None,
     mode: str = "report",
 ) -> InlineKeyboardMarkup:
     """Клавиатура со списком бункеров. exclude_ids — уже выбранные (скрываются)."""
-    available = _get_available_bunkers(mode, exclude_ids)
+    available = _get_available_bunkers(mode, exclude_ids, exclude_keys)
 
     total = len(available)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -242,6 +254,7 @@ async def _bunker_start_impl(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["bunker_page"] = 0
     context.user_data["bunker_log"] = []
     context.user_data["bunker_selected_ids"] = set()
+    context.user_data["bunker_selected_keys"] = set()
     # Режим задаётся в entry point: "report" или "request"
     mode = context.user_data.get("bunker_mode", "report")
 
@@ -264,7 +277,7 @@ async def _bunker_start_impl(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         prompt = "Выберите опустошённый бункер (или несколько по очереди):"
 
-    await update.message.reply_text(prompt, reply_markup=_build_bunker_keyboard(0, set(), mode))
+    await update.message.reply_text(prompt, reply_markup=_build_bunker_keyboard(0, set(), set(), mode))
     return STATE_BUNKER
 
 
@@ -297,9 +310,10 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         page = 0
 
     exclude = context.user_data.get("bunker_selected_ids", set())
+    exclude_keys = context.user_data.get("bunker_selected_keys", set())
 
     mode = context.user_data.get("bunker_mode", "report")
-    available = _get_available_bunkers(mode, exclude)
+    available = _get_available_bunkers(mode, exclude, exclude_keys)
     total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
     page = min(max(page, 0), total_pages - 1)
     context.user_data["bunker_page"] = page
@@ -311,7 +325,7 @@ async def page_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         preview = [f"• {_bunker_label(x)}" for x in log[-3:]]
         text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
 
-    await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude, mode))
+    await query.edit_message_text(text, reply_markup=_build_bunker_keyboard(page, exclude, exclude_keys, mode))
     return STATE_BUNKER
 
 
@@ -327,7 +341,7 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Отменено.")
         return ConversationHandler.END
     if data == "done":
-        log = context.user_data.get("bunker_log", [])
+        log = dedupe_bunker_items(context.user_data.get("bunker_log", []))
         mode = context.user_data.get("bunker_mode", "report")
 
         if log:
@@ -377,28 +391,38 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return STATE_BUNKER
 
     mode = context.user_data.get("bunker_mode", "report")
+    selected_ids = context.user_data.get("bunker_selected_ids", set())
+    selected_keys = context.user_data.get("bunker_selected_keys", set())
+
+    log_entry = get_bunker_log_entry(bunker_id)
+    if not log_entry:
+        await query.answer("Ошибка: бункер не найден.", show_alert=True)
+        return STATE_BUNKER
+
+    bunker_key = get_bunker_identity_key(log_entry)
+    if bunker_id in selected_ids or bunker_key in selected_keys:
+        await query.answer("Этот бункер уже выбран.", show_alert=False)
+        return STATE_BUNKER
+
+    selected_ids.add(bunker_id)
+    selected_keys.add(bunker_key)
+    context.user_data["bunker_selected_ids"] = selected_ids
+    context.user_data["bunker_selected_keys"] = selected_keys
 
     if mode == "report":
         date_str = datetime.now().strftime("%d.%m.%Y")
         row, map_ok = record_pickup_by_bunker_id(bunker_id, date_str, 1)
         if not row:
+            selected_ids.discard(bunker_id)
+            selected_keys.discard(bunker_key)
             await query.answer("Ошибка: бункер не найден.", show_alert=True)
             return STATE_BUNKER
-        log_entry = get_bunker_log_entry(bunker_id)
-        if not log_entry:
-            log_entry = {"contractor": row.get("Контрагент", ""), "note": row.get("Примечание", ""), "number": "?", "address": ""}
     else:
-        log_entry = get_bunker_log_entry(bunker_id)
-        if not log_entry:
-            await query.answer("Ошибка: бункер не найден.", show_alert=True)
-            return STATE_BUNKER
         map_ok = mark_bunker_filled(bunker_id)
 
     if "bunker_log" not in context.user_data:
         context.user_data["bunker_log"] = []
     context.user_data["bunker_log"].append(log_entry)
-    selected_ids = context.user_data.get("bunker_selected_ids", set())
-    selected_ids.add(bunker_id)
 
     if mode == "request":
         answer_txt = f"Принято, карта обновлена ✓" if map_ok else "Принято ✓"
@@ -409,7 +433,7 @@ async def bunker_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     page = context.user_data.get("bunker_page", 0)
     preview = [f"• {_bunker_label(x)}" for x in context.user_data["bunker_log"][-5:]]
     prompt_suffix = "Выберите ещё бункер или Готово:\n\n" + "\n".join(preview)
-    await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids, mode))
+    await query.edit_message_text(prompt_suffix, reply_markup=_build_bunker_keyboard(page, selected_ids, selected_keys, mode))
     return STATE_BUNKER
 
 

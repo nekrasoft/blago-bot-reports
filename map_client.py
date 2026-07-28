@@ -313,6 +313,38 @@ def format_note_with_bunker_numbers(
     return f"# {','.join(ordered)}"
 
 
+def _normalize_bunker_identity_value(value: object) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
+
+
+def get_bunker_identity_key(item: dict) -> str:
+    """
+    Логический ключ физического бункера для защиты от дублей в API/кнопках.
+    id намеренно не используется: одна физическая точка может прийти с разными id.
+    """
+    contractor = _normalize_bunker_identity_value(item.get("contractor"))
+    number = _normalize_bunker_number(item.get("number"))
+    number_key = _normalize_bunker_identity_value(number or item.get("id") or "?")
+    district = _get_bunker_district(item)
+    address = _address_to_note(item.get("address", ""))
+    note, _ = split_note_and_bunker_numbers(item.get("note", ""))
+    location = _normalize_bunker_identity_value(district or address or note)
+    return "\x1f".join((contractor, number_key, location))
+
+
+def dedupe_bunker_items(items: list[dict]) -> list[dict]:
+    """Сохраняет первый бункер для каждого логического ключа."""
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        key = get_bunker_identity_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result
+
+
 def _get_district_for_note(note: str) -> str | None:
     """Получение district по примечанию."""
     note_text, _ = split_note_and_bunker_numbers(note)
