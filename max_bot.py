@@ -8,7 +8,6 @@ import mimetypes
 import os
 import re
 import sys
-from collections import defaultdict
 from datetime import datetime, time
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -36,6 +35,11 @@ from bunker_report import (
     _get_available_bunkers,
     _get_sorted_bunkers,
 )
+from bunker_pickup import (
+    build_pickup_sheet_row,
+    format_billing_units,
+    pickup_group_key,
+)
 from driver_time_buttons import (
     DRIVER_START_TIME_OPTIONS,
     get_driver_end_time_options,
@@ -49,14 +53,11 @@ from driver_work_time_db import (
 )
 from driver_work_time_periods import format_month, get_month_range
 from map_client import (
-    build_container_pickup_row,
-    dedupe_bunker_items,
-    format_note_with_bunker_numbers,
+    create_pickup_report,
     get_bunker_log_entry,
     get_bunker_identity_key,
     get_trip_removal_counterparties,
     mark_bunker_filled,
-    record_pickup_by_bunker_id,
 )
 from sheets_client import append_rows
 from waybill_files_db import save_waybill_file
@@ -86,6 +87,13 @@ def _get_allowed_chat_ids() -> set[int]:
 
 class BunkerDialog(StatesGroup):
     selecting = State()
+    selecting_units = State()
+    selecting_cleanup = State()
+    waiting_cleanup_comment = State()
+    waiting_photos = State()
+    waiting_waybill = State()
+    selecting_waybill_reason = State()
+    confirming = State()
 
 
 class HodkaDialog(StatesGroup):
@@ -107,12 +115,13 @@ def _build_bunker_keyboard_max(
     exclude_ids: set | None = None,
     exclude_keys: set | None = None,
     mode: str = "report",
+    group_key: tuple[str, str] | None = None,
 ) -> tuple[object, int, int]:
     """Клавиатура со списком бункеров для MAX.
 
     Возвращает (markup, page, total_pages).
     """
-    available = _get_available_bunkers(mode, exclude_ids, exclude_keys)
+    available = _get_available_bunkers(mode, exclude_ids, exclude_keys, group_key)
 
     total = len(available)
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
@@ -140,6 +149,61 @@ def _build_bunker_keyboard_max(
     builder.row(CallbackButton(text="Отмена", payload="cancel"))
 
     return builder.as_markup(), page, total_pages
+
+
+def _max_buttons(rows: list[list[tuple[str, str]]]):
+    builder = InlineKeyboardBuilder()
+    for row in rows:
+        builder.row(*(CallbackButton(text=text, payload=payload) for text, payload in row))
+    return builder.as_markup()
+
+
+def _units_keyboard_max():
+    return _max_buttons([
+        [("1", "units:1"), ("1,5", "units:1.5"), ("2", "units:2")],
+        [("Отмена", "cancel")],
+    ])
+
+
+def _cleanup_keyboard_max():
+    return _max_buttons([
+        [("Прибрана", "cleanup:cleaned")],
+        [("Уборка не требовалась", "cleanup:not_required")],
+        [("Не прибрана", "cleanup:not_cleaned")],
+        [("Отмена", "cancel")],
+    ])
+
+
+def _photos_keyboard_max():
+    return _max_buttons([
+        [("Фото загружены — дальше", "photos_done")],
+        [("Завершить без фото", "photos_skip")],
+        [("Отмена", "cancel")],
+    ])
+
+
+def _pickup_waybill_keyboard_max():
+    return _max_buttons([
+        [("Завершить без талона", "waybill_skip")],
+        [("Отмена", "cancel")],
+    ])
+
+
+def _waybill_reason_keyboard_max():
+    return _max_buttons([
+        [("Мастер отсутствовал", "waybill_reason:Мастер отсутствовал")],
+        [("Отказались подписывать", "waybill_reason:Отказались подписывать")],
+        [("Талон будет позже", "waybill_reason:Талон будет передан позже")],
+        [("Документ утрачен", "waybill_reason:Документ утрачен")],
+        [("Другое", "waybill_reason:Другое")],
+    ])
+
+
+def _pickup_confirm_keyboard_max():
+    return _max_buttons([
+        [("✅ Подтвердить вывоз", "confirm")],
+        [("Отмена", "cancel")],
+    ])
 
 
 def _counterparty_title(item: dict) -> str:
@@ -1045,21 +1109,11 @@ async def _save_driver_time_end(
 async def _start_bunker_dialog(
     event: MessageCreated, context: MemoryContext, mode: str
 ) -> None:
-    """Общая логика старта диалога выбора бункеров."""
-    bunkers = _get_sorted_bunkers()
-    if not bunkers:
-        await event.message.answer("Бункеры не найдены. Проверьте настройку MAP_SERVICE_URL.")
-        return
-    available = [b for b in _filter_bunkers_by_mode(bunkers, mode) if b.get("id")]
+    available = [b for b in _filter_bunkers_by_mode(_get_sorted_bunkers(), mode) if b.get("id")]
     if not available:
-        msg = (
-            "Нет бункеров с заполненностью меньше 100%."
-            if mode == "request"
-            else "Нет бункеров со 100% заполненностью."
-        )
-        await event.message.answer(msg)
+        text = "Нет бункеров без активной заявки." if mode == "request" else "Нет активных заявок на вывоз."
+        await event.message.answer(text)
         return
-
     await context.set_state(BunkerDialog.selecting)
     await context.update_data(
         mode=mode,
@@ -1067,23 +1121,21 @@ async def _start_bunker_dialog(
         bunker_log=[],
         selected_ids=[],
         selected_keys=[],
+        site_photos=[],
     )
-
-    markup, _, _ = _build_bunker_keyboard_max(0, set(), set(), mode)
-
-    if mode == "request":
-        prompt = "Выберите бункер для заявки на опустошение (или несколько по очереди):"
-    else:
-        prompt = "Выберите опустошённый бункер (или несколько по очереди):"
-
+    markup, _, _ = _build_bunker_keyboard_max(mode=mode)
+    prompt = "Выберите бункер для заявки:" if mode == "request" else "Выберите вывезенный бункер:"
     await event.message.answer(text=prompt, attachments=[markup])
+
+
+def _max_group_key(data: dict) -> tuple[str, str] | None:
+    value = data.get("group_key")
+    return tuple(value) if isinstance(value, (list, tuple)) and len(value) == 2 else None
 
 
 @dp.message_callback(BunkerDialog.selecting)
 async def handle_bunker_callback(event: MessageCallback, context: MemoryContext) -> None:
-    """Обработка всех нажатий кнопок в диалоге выбора бункеров."""
     payload = event.callback.payload or ""
-
     if payload == "cancel":
         await _callback_cancel(event, context)
     elif payload == "done":
@@ -1095,143 +1147,335 @@ async def handle_bunker_callback(event: MessageCallback, context: MemoryContext)
 
 
 async def _callback_cancel(event: MessageCallback, context: MemoryContext) -> None:
-    """Отмена выбора бункеров."""
     await context.clear()
     await event.message.delete()
     await event.message.answer(text="Отменено.")
 
 
 async def _callback_done(event: MessageCallback, context: MemoryContext) -> None:
-    """Завершение выбора бункеров."""
     data = await context.get_data()
-    bunker_log = dedupe_bunker_items(data.get("bunker_log", []))
-    mode = data.get("mode", "report")
-    await context.clear()
-
-    if not bunker_log:
-        msg = "Ничего не принято." if mode == "request" else "Ничего не записано."
-        await event.answer(new_text=msg)
+    log = data.get("bunker_log", [])
+    if not log:
+        await event.message.answer("Сначала выберите бункер.")
         return
-
-    if mode == "report":
-        date_str = datetime.now().strftime("%d.%m.%Y")
-        by_key: dict = defaultdict(list)
-        for item in bunker_log:
-            key = (item["contractor"], item["note"])
-            by_key[key].append(item)
-        rows = []
-        for (contractor, note), items in sorted(by_key.items()):
-            note_with_numbers = format_note_with_bunker_numbers(
-                note,
-                [item.get("number") for item in items],
-            )
-            rows.append(
-                build_container_pickup_row(
-                    contractor,
-                    note_with_numbers,
-                    len(items),
-                    date_str,
-                )
-            )
-        try:
-            append_rows(rows)
-        except Exception as e:
-            await event.message.answer(f"Ошибка записи в таблицу: {e}")
-        report = _format_bunker_report(bunker_log)
-    else:
-        report = _format_request_report(bunker_log)
-
+    if data.get("mode") == "request":
+        await context.clear()
+        await event.message.delete()
+        await event.message.answer(_format_request_report(log))
+        return
+    await context.set_state(BunkerDialog.selecting_cleanup)
     await event.message.delete()
-    await event.message.answer(text=report)
+    await event.message.answer(
+        "Была ли прибрана территория после вывоза?",
+        attachments=[_cleanup_keyboard_max()],
+    )
 
 
-async def _callback_page(
-    event: MessageCallback, context: MemoryContext, payload: str
-) -> None:
-    """Переключение страницы списка бункеров."""
+async def _callback_page(event: MessageCallback, context: MemoryContext, payload: str) -> None:
     try:
-        page = int(payload.replace("page:", "", 1))
-    except ValueError:
+        page = int(payload.split(":", 1)[1])
+    except (IndexError, ValueError):
         page = 0
-
     data = await context.get_data()
     selected_ids = set(data.get("selected_ids", []))
     selected_keys = set(data.get("selected_keys", []))
-    mode = data.get("mode", "report")
-    bunker_log = data.get("bunker_log", [])
-    prefix = "Принято:" if mode == "request" else "Записано:"
-
-    available = _get_available_bunkers(mode, selected_ids, selected_keys)
-    total_pages = max(1, (len(available) + PAGE_SIZE - 1) // PAGE_SIZE)
-    page = min(max(page, 0), total_pages - 1)
+    markup, page, total = _build_bunker_keyboard_max(
+        page,
+        selected_ids,
+        selected_keys,
+        data.get("mode", "report"),
+        _max_group_key(data),
+    )
     await context.update_data(page=page)
-    text = f"Стр. {page + 1}/{total_pages}. Выберите бункер:"
-
-    if bunker_log:
-        preview = [f"• {_bunker_label(x)}" for x in bunker_log[-3:]]
-        text = f"{prefix}\n" + "\n".join(preview) + "\n\n" + text
-
-    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, selected_keys, mode)
     await event.message.delete()
-    await event.message.answer(text=text, attachments=[markup])
+    await event.message.answer(f"Стр. {page + 1}/{total}. Выберите бункер:", attachments=[markup])
 
 
-async def _callback_bunker(
-    event: MessageCallback, context: MemoryContext, payload: str
-) -> None:
-    """Выбор конкретного бункера из списка."""
-    bunker_id = payload.replace("bunker:", "", 1)
-    if not bunker_id:
-        return
-
+async def _callback_bunker(event: MessageCallback, context: MemoryContext, payload: str) -> None:
+    bunker_id = payload.split(":", 1)[-1]
     data = await context.get_data()
-    mode = data.get("mode", "report")
-    page = data.get("page", 0)
-    bunker_log: list[dict] = data.get("bunker_log", [])
-    selected_ids: set[str] = set(data.get("selected_ids", []))
-    selected_keys: set[str] = set(data.get("selected_keys", []))
-
-    log_entry = get_bunker_log_entry(bunker_id)
-    if not log_entry:
-        await event.message.answer("Ошибка: бункер не найден.")
+    item = get_bunker_log_entry(bunker_id)
+    if not item:
+        await event.message.answer("Бункер не найден.")
         return
-
-    bunker_key = get_bunker_identity_key(log_entry)
-    if bunker_id in selected_ids or bunker_key in selected_keys:
+    selected_ids = set(data.get("selected_ids", []))
+    if bunker_id in selected_ids:
         await event.message.answer("Этот бункер уже выбран.")
         return
 
-    selected_ids.add(bunker_id)
-    selected_keys.add(bunker_key)
-
-    if mode == "report":
-        date_str = datetime.now().strftime("%d.%m.%Y")
-        row, map_ok = record_pickup_by_bunker_id(bunker_id, date_str, 1)
-        if not row:
-            selected_ids.discard(bunker_id)
-            selected_keys.discard(bunker_key)
-            await event.message.answer("Ошибка: бункер не найден.")
+    if data.get("mode") == "request":
+        if not mark_bunker_filled(bunker_id):
+            await event.message.answer("Не удалось создать заявку.")
             return
-    else:
-        map_ok = mark_bunker_filled(bunker_id)
+        selected_ids.add(bunker_id)
+        log = data.get("bunker_log", []) + [item]
+        await context.update_data(bunker_log=log, selected_ids=list(selected_ids))
+        markup, _, _ = _build_bunker_keyboard_max(
+            data.get("page", 0), selected_ids, set(), "request"
+        )
+        await event.message.delete()
+        await event.message.answer("Заявка создана ✓\n\nВыберите ещё бункер или нажмите «Готово»:", attachments=[markup])
+        return
 
-    bunker_log.append(log_entry)
-    await context.update_data(
-        bunker_log=bunker_log,
-        selected_ids=list(selected_ids),
-        selected_keys=list(selected_keys),
+    group = _max_group_key(data)
+    if group is not None and pickup_group_key(item) != group:
+        await event.message.answer("Выберите бункер того же контрагента и площадки.")
+        return
+    await context.update_data(pending_item=item)
+    await context.set_state(BunkerDialog.selecting_units)
+    await event.message.delete()
+    await event.message.answer(
+        f"Укажите количество к оплате для {_bunker_label(item)}:",
+        attachments=[_units_keyboard_max()],
     )
 
-    if mode == "request":
-        answer_txt = "Принято, карта обновлена ✓" if map_ok else "Принято ✓"
-    else:
-        answer_txt = "Записано, карта обновлена ✓" if map_ok else "Записано ✓"
 
-    preview = [f"• {_bunker_label(x)}" for x in bunker_log[-5:]]
-    prompt_suffix = f"{answer_txt}\n\nВыберите ещё бункер или Готово:\n\n" + "\n".join(preview)
-    markup, _, _ = _build_bunker_keyboard_max(page, selected_ids, selected_keys, mode)
+@dp.message_callback(BunkerDialog.selecting_units)
+async def handle_bunker_units(event: MessageCallback, context: MemoryContext) -> None:
+    payload = event.callback.payload or ""
+    if payload == "cancel":
+        await _callback_cancel(event, context)
+        return
+    try:
+        units = float(payload.split(":", 1)[1])
+    except (IndexError, ValueError):
+        return
+    if units not in (1.0, 1.5, 2.0):
+        return
+    data = await context.get_data()
+    item = data.get("pending_item")
+    if not item:
+        await context.clear()
+        await event.message.answer("Данные устарели. Запустите /b заново.")
+        return
+    item["billing_units"] = units
+    log = data.get("bunker_log", []) + [item]
+    selected_ids = set(data.get("selected_ids", []))
+    selected_keys = set(data.get("selected_keys", []))
+    selected_ids.add(item["id"])
+    selected_keys.add(get_bunker_identity_key(item))
+    group = pickup_group_key(item)
+    await context.update_data(
+        pending_item=None,
+        bunker_log=log,
+        selected_ids=list(selected_ids),
+        selected_keys=list(selected_keys),
+        group_key=list(group),
+    )
+    await context.set_state(BunkerDialog.selecting)
+    preview = "\n".join(
+        f"• {_bunker_label(x)} × {format_billing_units(x['billing_units'])}" for x in log
+    )
+    markup, _, _ = _build_bunker_keyboard_max(
+        data.get("page", 0), selected_ids, selected_keys, "report", group
+    )
     await event.message.delete()
-    await event.message.answer(text=prompt_suffix, attachments=[markup])
+    await event.message.answer(
+        "Добавлено:\n" + preview + "\n\nВыберите ещё бункер или нажмите «Готово»: ",
+        attachments=[markup],
+    )
+
+
+@dp.message_callback(BunkerDialog.selecting_cleanup)
+async def handle_bunker_cleanup(event: MessageCallback, context: MemoryContext) -> None:
+    payload = event.callback.payload or ""
+    if payload == "cancel":
+        await _callback_cancel(event, context)
+        return
+    status = payload.split(":", 1)[-1]
+    if status not in {"cleaned", "not_required", "not_cleaned"}:
+        return
+    await context.update_data(cleanup_status=status)
+    await event.message.delete()
+    if status == "not_cleaned":
+        await context.set_state(BunkerDialog.waiting_cleanup_comment)
+        await event.message.answer("Укажите причину, почему территория не прибрана:")
+        return
+    await context.set_state(BunkerDialog.waiting_photos)
+    await event.message.answer(
+        "Приложите до пяти фото площадки одним сообщением или несколькими.",
+        attachments=[_photos_keyboard_max()],
+    )
+
+
+@dp.message_created(BunkerDialog.waiting_cleanup_comment)
+async def handle_bunker_cleanup_comment(event: MessageCreated, context: MemoryContext) -> None:
+    comment = _message_text(event).strip()
+    if not comment:
+        await event.message.answer("Комментарий обязателен.")
+        return
+    await context.update_data(cleanup_comment=comment[:500])
+    await context.set_state(BunkerDialog.waiting_photos)
+    await event.message.answer(
+        "Приложите до пяти фото площадки одним сообщением или несколькими.",
+        attachments=[_photos_keyboard_max()],
+    )
+
+
+async def _download_max_site_photos(message) -> list[dict]:
+    body = getattr(message, "body", None)
+    attachments = list(getattr(body, "attachments", None) or [])
+    result = []
+    max_size = _get_waybill_max_file_size_bytes()
+    for attachment in attachments:
+        if _attachment_type_text(attachment) != "image":
+            continue
+        url = _attachment_payload_url(attachment)
+        if not url:
+            continue
+        file_bytes, response_type = await _download_max_attachment_bytes(
+            url, _attachment_payload_token(attachment), max_size
+        )
+        file_name = _attachment_file_name(attachment, url) or "site_photo.jpg"
+        content_type = _detect_waybill_content_type(file_name, response_type, file_bytes)
+        if not content_type.startswith("image/"):
+            continue
+        result.append({
+            "file_bytes": file_bytes,
+            "file_name": _normalize_waybill_file_name(
+                file_name, content_type, file_bytes, _attachment_payload_token(attachment)
+            ),
+            "content_type": content_type,
+            "source_file_id": _attachment_payload_token(attachment) or url,
+        })
+    return result
+
+
+@dp.message_created(BunkerDialog.waiting_photos)
+async def handle_bunker_photos(event: MessageCreated, context: MemoryContext) -> None:
+    data = await context.get_data()
+    current = list(data.get("site_photos", []))
+    try:
+        incoming = await _download_max_site_photos(event.message)
+    except Exception as error:
+        await event.message.answer(str(error), attachments=[_photos_keyboard_max()])
+        return
+    if not incoming:
+        await event.message.answer("Прикрепите изображение.", attachments=[_photos_keyboard_max()])
+        return
+    current.extend(incoming[: 5 - len(current)])
+    await context.update_data(site_photos=current)
+    await event.message.answer(f"Принято фото: {len(current)}/5", attachments=[_photos_keyboard_max()])
+
+
+@dp.message_callback(BunkerDialog.waiting_photos)
+async def handle_bunker_photos_callback(event: MessageCallback, context: MemoryContext) -> None:
+    payload = event.callback.payload or ""
+    if payload == "cancel":
+        await _callback_cancel(event, context)
+        return
+    data = await context.get_data()
+    if payload == "photos_done" and not data.get("site_photos"):
+        await event.message.answer("Сначала приложите фото или выберите «Без фото».")
+        return
+    required = bool(data.get("bunker_log", [{}])[0].get("requiresContainerWaybill"))
+    await context.update_data(waybill_required=required)
+    await context.set_state(BunkerDialog.waiting_waybill)
+    await event.message.delete()
+    prompt = "Приложите подписанный талон (фото или PDF)." if required else "При необходимости приложите подписанный талон (фото или PDF)."
+    await event.message.answer(prompt, attachments=[_pickup_waybill_keyboard_max()])
+
+
+@dp.message_created(BunkerDialog.waiting_waybill)
+async def handle_bunker_waybill(event: MessageCreated, context: MemoryContext) -> None:
+    try:
+        waybill = await _download_max_waybill(event.message)
+    except Exception as error:
+        await event.message.answer(str(error), attachments=[_pickup_waybill_keyboard_max()])
+        return
+    await context.update_data(waybill=waybill, waybill_missing_reason=None)
+    await _show_max_pickup_confirmation(event, context)
+
+
+@dp.message_callback(BunkerDialog.waiting_waybill)
+async def handle_bunker_waybill_callback(event: MessageCallback, context: MemoryContext) -> None:
+    payload = event.callback.payload or ""
+    if payload == "cancel":
+        await _callback_cancel(event, context)
+        return
+    data = await context.get_data()
+    if data.get("waybill_required"):
+        await context.set_state(BunkerDialog.selecting_waybill_reason)
+        await event.message.delete()
+        await event.message.answer("Укажите причину отсутствия талона:", attachments=[_waybill_reason_keyboard_max()])
+        return
+    await _show_max_pickup_confirmation(event, context)
+
+
+@dp.message_callback(BunkerDialog.selecting_waybill_reason)
+async def handle_bunker_waybill_reason(event: MessageCallback, context: MemoryContext) -> None:
+    reason = (event.callback.payload or "").split(":", 1)[-1][:500]
+    await context.update_data(waybill_missing_reason=reason)
+    await _show_max_pickup_confirmation(event, context)
+
+
+async def _show_max_pickup_confirmation(
+    event: MessageCreated | MessageCallback, context: MemoryContext
+) -> None:
+    data = await context.get_data()
+    log = data.get("bunker_log", [])
+    lines = [f"• №{item.get('number', '?')} × {format_billing_units(item['billing_units'])}" for item in log]
+    text = (
+        f"Контрагент: {log[0].get('contractor', '')}\n"
+        + "\n".join(lines)
+        + f"\nФото: {len(data.get('site_photos', []))}"
+        + f"\nТалон: {'приложен' if data.get('waybill') else 'не приложен'}"
+    )
+    await context.set_state(BunkerDialog.confirming)
+    await event.message.answer(text, attachments=[_pickup_confirm_keyboard_max()])
+
+
+@dp.message_callback(BunkerDialog.confirming)
+async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) -> None:
+    payload = event.callback.payload or ""
+    if payload == "cancel":
+        await _callback_cancel(event, context)
+        return
+    data = await context.get_data()
+    log = data.get("bunker_log", [])
+    waybill = data.get("waybill")
+    token = generate_waybill_token() if waybill else None
+    try:
+        if waybill and token:
+            save_waybill_file(
+                file_token=token,
+                source="max",
+                file_bytes=waybill["file_bytes"],
+                source_chat_id=_max_chat_id(event),
+                source_user_id=_max_user_id(event),
+                source_message_id=_max_message_id(event),
+                source_file_id=waybill.get("source_file_id"),
+                file_name=waybill.get("file_name"),
+                content_type=waybill.get("content_type"),
+            )
+        create_pickup_report(
+            items=[{"bunkerId": item["id"], "billingUnits": item["billing_units"]} for item in log],
+            cleanup_status=data.get("cleanup_status", "not_required"),
+            cleanup_comment=data.get("cleanup_comment"),
+            driver_source="max",
+            driver_user_id=_max_user_id(event) or "unknown",
+            driver_name=_max_user_name(event),
+            site_photos=data.get("site_photos", []),
+            waybill=waybill,
+            waybill_token=token,
+            waybill_missing_reason=data.get("waybill_missing_reason"),
+        )
+    except Exception as error:
+        await event.message.answer(f"Не удалось сохранить вывоз: {error}")
+        return
+
+    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), token)
+    sheet_error = None
+    try:
+        append_rows([row])
+    except Exception as error:
+        sheet_error = str(error)
+    report = _format_bunker_report(log)
+    if sheet_error:
+        report += f"\n\n⚠️ Вывоз сохранён, но запись в Google Sheets не выполнена: {sheet_error}"
+    await context.clear()
+    await event.message.delete()
+    await event.message.answer(report)
 
 
 @dp.message_callback(HodkaDialog.selecting)

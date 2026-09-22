@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 from datetime import datetime
@@ -97,6 +98,74 @@ def get_counterparties() -> list[dict]:
     except Exception as e:
         logger.warning("Карта: GET /api/counterparties — ошибка: %s", e)
         return []
+
+
+def create_pickup_report(
+    *,
+    items: list[dict],
+    cleanup_status: str,
+    cleanup_comment: str | None,
+    driver_source: str,
+    driver_user_id: str | int,
+    driver_name: str | None,
+    site_photos: list[dict] | None = None,
+    waybill: dict | None = None,
+    waybill_token: str | None = None,
+    waybill_missing_reason: str | None = None,
+) -> dict:
+    """Атомарно завершает заявки и сохраняет подтверждения в API карты."""
+    base = _get_base_url()
+    if not base or not httpx:
+        raise RuntimeError("API карты недоступно")
+
+    payload = {
+        "items": items,
+        "cleanupStatus": cleanup_status,
+        "cleanupComment": cleanup_comment,
+        "driverSource": driver_source,
+        "driverUserId": str(driver_user_id),
+        "driverName": driver_name,
+        "waybillToken": waybill_token,
+        "waybillMissingReason": waybill_missing_reason,
+    }
+    files = []
+    for index, photo in enumerate(site_photos or [], start=1):
+        files.append(
+            (
+                "sitePhotos[]",
+                (
+                    photo.get("file_name") or f"site_{index}.jpg",
+                    photo["file_bytes"],
+                    photo.get("content_type") or "image/jpeg",
+                ),
+            )
+        )
+    if waybill:
+        files.append(
+            (
+                "waybill",
+                (
+                    waybill.get("file_name") or "waybill.jpg",
+                    waybill["file_bytes"],
+                    waybill.get("content_type") or "image/jpeg",
+                ),
+            )
+        )
+
+    response = httpx.post(
+        f"{base}/api/pickup-reports",
+        data={"payload": json.dumps(payload, ensure_ascii=False)},
+        files=files,
+        headers=_get_write_api_headers(),
+        timeout=60.0,
+    )
+    if response.is_error:
+        try:
+            message = response.json().get("error")
+        except Exception:
+            message = None
+        raise RuntimeError(message or f"API карты вернуло HTTP {response.status_code}")
+    return response.json()
 
 
 def get_trip_removal_counterparties() -> list[dict]:
@@ -522,9 +591,13 @@ def get_bunker_log_entry(bunker_id: str) -> dict | None:
     note = district if district else _address_to_note(address)
     number = bunker.get("number", "?")
     return {
+        "id": bunker_id,
         "contractor": contractor,
+        "counterpartyId": bunker.get("counterpartyId"),
         "note": note,
         "number": number,
+        "volume": bunker.get("volume", 8),
         "address": address,
         "district": district,
+        "requiresContainerWaybill": bool(bunker.get("requiresContainerWaybill")),
     }
