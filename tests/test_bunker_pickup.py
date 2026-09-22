@@ -14,7 +14,7 @@ class BunkerPickupTest(unittest.TestCase):
             "wb_12345678",
         )
 
-        self.assertEqual(row["Объект"], "2.5")
+        self.assertEqual(row["Объект"], "2,5")
         self.assertIn("# 1,2", row["Примечание"])
         self.assertIn("[ПЛ:wb_12345678]", row["Примечание"])
 

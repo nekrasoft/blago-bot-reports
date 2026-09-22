@@ -57,6 +57,6 @@ def build_pickup_sheet_row(items: list[dict], date_str: str, waybill_token: str 
     return build_container_pickup_row(
         str(first.get("contractor") or ""),
         note,
-        format(total_billing_units(items).normalize(), "f"),
+        format_billing_units(total_billing_units(items)),
         date_str,
     )
