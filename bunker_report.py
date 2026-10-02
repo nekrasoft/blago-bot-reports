@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 
 from bunker_pickup import (
+    MAX_SITE_PHOTOS,
     build_pickup_sheet_row,
     format_billing_units,
     pickup_group_key,
@@ -508,7 +509,7 @@ async def cleanup_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text("Укажите причину, почему территория не прибрана:")
         return STATE_CLEANUP_COMMENT
     await query.edit_message_text(
-        "Приложите до пяти фото площадки одним альбомом или несколькими сообщениями.",
+        f"Приложите до {MAX_SITE_PHOTOS} фото площадки одним альбомом или несколькими сообщениями.",
         reply_markup=_photos_keyboard(),
     )
     return STATE_PHOTOS
@@ -523,7 +524,7 @@ async def cleanup_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return STATE_CLEANUP_COMMENT
     context.user_data["bunker_cleanup_comment"] = comment[:500]
     await update.message.reply_text(
-        "Приложите до пяти фото площадки одним альбомом или несколькими сообщениями.",
+        f"Приложите до {MAX_SITE_PHOTOS} фото площадки одним альбомом или несколькими сообщениями.",
         reply_markup=_photos_keyboard(),
     )
     return STATE_PHOTOS
@@ -566,15 +567,15 @@ async def photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message:
         return STATE_PHOTOS
     photos = context.user_data.setdefault("bunker_site_photos", [])
-    if len(photos) >= 5:
-        await update.message.reply_text("Уже загружено пять фотографий.", reply_markup=_photos_keyboard())
+    if len(photos) >= MAX_SITE_PHOTOS:
+        await update.message.reply_text(f"Уже загружено {MAX_SITE_PHOTOS} фотографий.", reply_markup=_photos_keyboard())
         return STATE_PHOTOS
     try:
         photos.append(await _download_telegram_attachment(update.message, allow_pdf=False))
     except ValueError as error:
         await update.message.reply_text(str(error), reply_markup=_photos_keyboard())
         return STATE_PHOTOS
-    await update.message.reply_text(f"Фото принято ({len(photos)}/5).", reply_markup=_photos_keyboard())
+    await update.message.reply_text(f"Фото принято ({len(photos)}/{MAX_SITE_PHOTOS}).", reply_markup=_photos_keyboard())
     return STATE_PHOTOS
 
 

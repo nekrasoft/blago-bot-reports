@@ -6,6 +6,7 @@ from map_client import build_container_pickup_row, format_note_with_bunker_numbe
 from waybill_notes import format_note_with_waybill_token
 
 ALLOWED_BILLING_UNITS = (Decimal("1"), Decimal("1.5"), Decimal("2"))
+MAX_SITE_PHOTOS = 10
 
 
 def pickup_group_key(item: dict) -> tuple[str, str]:

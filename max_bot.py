@@ -36,6 +36,7 @@ from bunker_report import (
     _get_sorted_bunkers,
 )
 from bunker_pickup import (
+    MAX_SITE_PHOTOS,
     build_pickup_sheet_row,
     format_billing_units,
     pickup_group_key,
@@ -1293,7 +1294,7 @@ async def handle_bunker_cleanup(event: MessageCallback, context: MemoryContext) 
         return
     await context.set_state(BunkerDialog.waiting_photos)
     await event.message.answer(
-        "Приложите до пяти фото площадки одним сообщением или несколькими.",
+        f"Приложите до {MAX_SITE_PHOTOS} фото площадки одним сообщением или несколькими.",
         attachments=[_photos_keyboard_max()],
     )
 
@@ -1307,7 +1308,7 @@ async def handle_bunker_cleanup_comment(event: MessageCreated, context: MemoryCo
     await context.update_data(cleanup_comment=comment[:500])
     await context.set_state(BunkerDialog.waiting_photos)
     await event.message.answer(
-        "Приложите до пяти фото площадки одним сообщением или несколькими.",
+        f"Приложите до {MAX_SITE_PHOTOS} фото площадки одним сообщением или несколькими.",
         attachments=[_photos_keyboard_max()],
     )
 
@@ -1353,9 +1354,11 @@ async def handle_bunker_photos(event: MessageCreated, context: MemoryContext) ->
     if not incoming:
         await event.message.answer("Прикрепите изображение.", attachments=[_photos_keyboard_max()])
         return
-    current.extend(incoming[: 5 - len(current)])
+    current.extend(incoming[: MAX_SITE_PHOTOS - len(current)])
     await context.update_data(site_photos=current)
-    await event.message.answer(f"Принято фото: {len(current)}/5", attachments=[_photos_keyboard_max()])
+    await event.message.answer(
+        f"Принято фото: {len(current)}/{MAX_SITE_PHOTOS}", attachments=[_photos_keyboard_max()]
+    )
 
 
 @dp.message_callback(BunkerDialog.waiting_photos)
