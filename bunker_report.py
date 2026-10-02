@@ -18,6 +18,7 @@ from telegram.ext import (
 
 from bunker_pickup import (
     MAX_SITE_PHOTOS,
+    MAX_WAYBILLS,
     build_pickup_sheet_row,
     format_billing_units,
     pickup_group_key,
@@ -290,6 +291,7 @@ def _photos_keyboard() -> InlineKeyboardMarkup:
 
 def _waybill_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Талоны загружены — дальше", callback_data="waybill_done")],
         [InlineKeyboardButton("Завершить без талона", callback_data="waybill_skip")],
         [InlineKeyboardButton("Отмена", callback_data=CANCEL)],
     ])
@@ -591,9 +593,9 @@ async def photos_finished(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     requires_waybill = bool(context.user_data["bunker_log"][0].get("requiresContainerWaybill"))
     context.user_data["bunker_waybill_required"] = requires_waybill
-    prompt = "Приложите подписанный талон (фото или PDF)."
+    prompt = f"Приложите до {MAX_WAYBILLS} подписанных талонов (фото или PDF)."
     if not requires_waybill:
-        prompt = "При необходимости приложите подписанный талон (фото или PDF)."
+        prompt = f"При необходимости приложите до {MAX_WAYBILLS} подписанных талонов (фото или PDF)."
     await query.edit_message_text(prompt, reply_markup=_waybill_keyboard())
     return STATE_WAYBILL
 
@@ -601,14 +603,22 @@ async def photos_finished(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def waybill_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message:
         return STATE_WAYBILL
+    waybills = context.user_data.setdefault("bunker_waybills", [])
+    if len(waybills) >= MAX_WAYBILLS:
+        await update.message.reply_text(
+            f"Уже загружено {MAX_WAYBILLS} талонов.", reply_markup=_waybill_keyboard()
+        )
+        return STATE_WAYBILL
     try:
-        context.user_data["bunker_waybill"] = await _download_telegram_attachment(update.message, allow_pdf=True)
+        waybills.append(await _download_telegram_attachment(update.message, allow_pdf=True))
     except ValueError as error:
         await update.message.reply_text(str(error), reply_markup=_waybill_keyboard())
         return STATE_WAYBILL
     context.user_data.pop("bunker_waybill_missing_reason", None)
-    await _show_confirmation(update, context)
-    return STATE_CONFIRM
+    await update.message.reply_text(
+        f"Талон принят ({len(waybills)}/{MAX_WAYBILLS}).", reply_markup=_waybill_keyboard()
+    )
+    return STATE_WAYBILL
 
 
 async def waybill_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -617,6 +627,13 @@ async def waybill_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return STATE_WAYBILL
     if query.data == CANCEL:
         return await _cancel(update, context)
+    if query.data == "waybill_done":
+        if not context.user_data.get("bunker_waybills"):
+            await query.answer("Сначала приложите талон или выберите «Без талона».", show_alert=True)
+            return STATE_WAYBILL
+        await query.answer()
+        await _show_confirmation(update, context)
+        return STATE_CONFIRM
     await query.answer()
     if context.user_data.get("bunker_waybill_required"):
         await query.edit_message_text("Укажите причину отсутствия талона:", reply_markup=_waybill_reason_keyboard())
@@ -642,7 +659,7 @@ async def _show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"Контрагент: {log[0].get('contractor', '')}\n"
         + "\n".join(lines)
         + f"\nФото: {len(context.user_data.get('bunker_site_photos', []))}"
-        + f"\nТалон: {'приложен' if context.user_data.get('bunker_waybill') else 'не приложен'}"
+        + f"\nТалоны: {len(context.user_data.get('bunker_waybills', []))}"
     )
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_confirm_keyboard())
@@ -658,11 +675,11 @@ async def confirm_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await _cancel(update, context)
     await query.answer()
     log = context.user_data.get("bunker_log", [])
-    waybill = context.user_data.get("bunker_waybill")
-    waybill_token = generate_waybill_token() if waybill else None
+    waybills = context.user_data.get("bunker_waybills", [])
+    waybill_tokens = [generate_waybill_token() for _ in waybills]
     user = update.effective_user
     try:
-        if waybill and waybill_token:
+        for waybill, waybill_token in zip(waybills, waybill_tokens, strict=True):
             save_waybill_file(
                 file_token=waybill_token,
                 source="telegram",
@@ -682,15 +699,15 @@ async def confirm_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             driver_user_id=user.id if user else "unknown",
             driver_name=user.full_name if user else None,
             site_photos=context.user_data.get("bunker_site_photos", []),
-            waybill=waybill,
-            waybill_token=waybill_token,
+            waybills=waybills,
+            waybill_tokens=waybill_tokens,
             waybill_missing_reason=context.user_data.get("bunker_waybill_missing_reason"),
         )
     except Exception as error:
         await query.edit_message_text(f"Не удалось сохранить вывоз: {error}")
         return STATE_CONFIRM
 
-    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), waybill_token)
+    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), waybill_tokens)
     sheet_error = None
     try:
         append_rows([row])
@@ -730,7 +747,7 @@ def get_bunker_conversation_handler() -> ConversationHandler:
             ],
             STATE_WAYBILL: [
                 MessageHandler(filters.PHOTO | filters.Document.ALL, waybill_received),
-                CallbackQueryHandler(waybill_skipped, pattern=r"^(waybill_skip|cancel)$"),
+                CallbackQueryHandler(waybill_skipped, pattern=r"^(waybill_done|waybill_skip|cancel)$"),
             ],
             STATE_WAYBILL_REASON: [CallbackQueryHandler(waybill_reason_selected, pattern=r"^waybill_reason:")],
             STATE_CONFIRM: [CallbackQueryHandler(confirm_pickup, pattern=r"^(confirm|cancel)$")],

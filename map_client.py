@@ -109,8 +109,8 @@ def create_pickup_report(
     driver_user_id: str | int,
     driver_name: str | None,
     site_photos: list[dict] | None = None,
-    waybill: dict | None = None,
-    waybill_token: str | None = None,
+    waybills: list[dict] | None = None,
+    waybill_tokens: list[str] | None = None,
     waybill_missing_reason: str | None = None,
 ) -> dict:
     """Атомарно завершает заявки и сохраняет подтверждения в API карты."""
@@ -125,7 +125,7 @@ def create_pickup_report(
         "driverSource": driver_source,
         "driverUserId": str(driver_user_id),
         "driverName": driver_name,
-        "waybillToken": waybill_token,
+        "waybillTokens": waybill_tokens or [],
         "waybillMissingReason": waybill_missing_reason,
     }
     files = []
@@ -140,12 +140,12 @@ def create_pickup_report(
                 ),
             )
         )
-    if waybill:
+    for index, waybill in enumerate(waybills or [], start=1):
         files.append(
             (
-                "waybill",
+                "waybills[]",
                 (
-                    waybill.get("file_name") or "waybill.jpg",
+                    waybill.get("file_name") or f"waybill_{index}.jpg",
                     waybill["file_bytes"],
                     waybill.get("content_type") or "image/jpeg",
                 ),

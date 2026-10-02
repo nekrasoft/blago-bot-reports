@@ -37,6 +37,7 @@ from bunker_report import (
 )
 from bunker_pickup import (
     MAX_SITE_PHOTOS,
+    MAX_WAYBILLS,
     build_pickup_sheet_row,
     format_billing_units,
     pickup_group_key,
@@ -185,6 +186,7 @@ def _photos_keyboard_max():
 
 def _pickup_waybill_keyboard_max():
     return _max_buttons([
+        [("Талоны загружены — дальше", "waybill_done")],
         [("Завершить без талона", "waybill_skip")],
         [("Отмена", "cancel")],
     ])
@@ -478,16 +480,20 @@ def _normalize_waybill_file_name(
 
 def _select_max_waybill_attachment(attachments: list[object]) -> object | None:
     for attachment in attachments:
-        type_text = _attachment_type_text(attachment)
-        url = _attachment_payload_url(attachment)
-        if not url:
-            continue
-        file_name = _attachment_file_name(attachment, url)
-        if type_text == "image":
-            return attachment
-        if type_text == "file" and _is_supported_waybill_type(file_name, None):
+        if _is_max_waybill_attachment(attachment):
             return attachment
     return None
+
+
+def _is_max_waybill_attachment(attachment: object) -> bool:
+    type_text = _attachment_type_text(attachment)
+    url = _attachment_payload_url(attachment)
+    if not url:
+        return False
+    file_name = _attachment_file_name(attachment, url)
+    return type_text == "image" or (
+        type_text == "file" and _is_supported_waybill_type(file_name, None)
+    )
 
 
 async def _download_max_attachment_bytes(
@@ -522,13 +528,7 @@ async def _download_max_attachment_bytes(
             return b"".join(chunks), response.headers.get("Content-Type", "")
 
 
-async def _download_max_waybill(message) -> dict:
-    body = getattr(message, "body", None)
-    attachments = list(getattr(body, "attachments", None) or [])
-    attachment = _select_max_waybill_attachment(attachments)
-    if attachment is None:
-        raise ValueError("Загрузите картинку или PDF с путевым листом.")
-
+async def _download_max_waybill_attachment(attachment: object) -> dict:
     max_size = _get_waybill_max_file_size_bytes()
     url = _attachment_payload_url(attachment)
     file_size = int(getattr(attachment, "size", 0) or 0)
@@ -559,6 +559,24 @@ async def _download_max_waybill(message) -> dict:
         "content_type": detected_content_type,
         "source_file_id": source_file_id,
     }
+
+
+async def _download_max_waybill(message) -> dict:
+    body = getattr(message, "body", None)
+    attachments = list(getattr(body, "attachments", None) or [])
+    attachment = _select_max_waybill_attachment(attachments)
+    if attachment is None:
+        raise ValueError("Загрузите картинку или PDF с путевым листом.")
+    return await _download_max_waybill_attachment(attachment)
+
+
+async def _download_max_waybills(message, limit: int) -> list[dict]:
+    body = getattr(message, "body", None)
+    attachments = list(getattr(body, "attachments", None) or [])
+    selected = [attachment for attachment in attachments if _is_max_waybill_attachment(attachment)][:limit]
+    if not selected:
+        raise ValueError("Загрузите картинки или PDF с талонами.")
+    return [await _download_max_waybill_attachment(attachment) for attachment in selected]
 
 
 def _max_chat_id(event: MessageCreated) -> int | None:
@@ -1375,19 +1393,31 @@ async def handle_bunker_photos_callback(event: MessageCallback, context: MemoryC
     await context.update_data(waybill_required=required)
     await context.set_state(BunkerDialog.waiting_waybill)
     await event.message.delete()
-    prompt = "Приложите подписанный талон (фото или PDF)." if required else "При необходимости приложите подписанный талон (фото или PDF)."
+    prompt = f"Приложите до {MAX_WAYBILLS} подписанных талонов (фото или PDF)."
+    if not required:
+        prompt = f"При необходимости приложите до {MAX_WAYBILLS} подписанных талонов (фото или PDF)."
     await event.message.answer(prompt, attachments=[_pickup_waybill_keyboard_max()])
 
 
 @dp.message_created(BunkerDialog.waiting_waybill)
 async def handle_bunker_waybill(event: MessageCreated, context: MemoryContext) -> None:
+    data = await context.get_data()
+    waybills = list(data.get("waybills", []))
+    if len(waybills) >= MAX_WAYBILLS:
+        await event.message.answer(
+            f"Уже загружено {MAX_WAYBILLS} талонов.", attachments=[_pickup_waybill_keyboard_max()]
+        )
+        return
     try:
-        waybill = await _download_max_waybill(event.message)
+        waybills.extend(await _download_max_waybills(event.message, MAX_WAYBILLS - len(waybills)))
     except Exception as error:
         await event.message.answer(str(error), attachments=[_pickup_waybill_keyboard_max()])
         return
-    await context.update_data(waybill=waybill, waybill_missing_reason=None)
-    await _show_max_pickup_confirmation(event, context)
+    await context.update_data(waybills=waybills, waybill_missing_reason=None)
+    await event.message.answer(
+        f"Принято талонов: {len(waybills)}/{MAX_WAYBILLS}",
+        attachments=[_pickup_waybill_keyboard_max()],
+    )
 
 
 @dp.message_callback(BunkerDialog.waiting_waybill)
@@ -1397,6 +1427,12 @@ async def handle_bunker_waybill_callback(event: MessageCallback, context: Memory
         await _callback_cancel(event, context)
         return
     data = await context.get_data()
+    if payload == "waybill_done":
+        if not data.get("waybills"):
+            await event.message.answer("Сначала приложите талон или выберите «Без талона».")
+            return
+        await _show_max_pickup_confirmation(event, context)
+        return
     if data.get("waybill_required"):
         await context.set_state(BunkerDialog.selecting_waybill_reason)
         await event.message.delete()
@@ -1422,7 +1458,7 @@ async def _show_max_pickup_confirmation(
         f"Контрагент: {log[0].get('contractor', '')}\n"
         + "\n".join(lines)
         + f"\nФото: {len(data.get('site_photos', []))}"
-        + f"\nТалон: {'приложен' if data.get('waybill') else 'не приложен'}"
+        + f"\nТалоны: {len(data.get('waybills', []))}"
     )
     await context.set_state(BunkerDialog.confirming)
     await event.message.answer(text, attachments=[_pickup_confirm_keyboard_max()])
@@ -1436,10 +1472,10 @@ async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) 
         return
     data = await context.get_data()
     log = data.get("bunker_log", [])
-    waybill = data.get("waybill")
-    token = generate_waybill_token() if waybill else None
+    waybills = data.get("waybills", [])
+    tokens = [generate_waybill_token() for _ in waybills]
     try:
-        if waybill and token:
+        for waybill, token in zip(waybills, tokens, strict=True):
             save_waybill_file(
                 file_token=token,
                 source="max",
@@ -1459,15 +1495,15 @@ async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) 
             driver_user_id=_max_user_id(event) or "unknown",
             driver_name=_max_user_name(event),
             site_photos=data.get("site_photos", []),
-            waybill=waybill,
-            waybill_token=token,
+            waybills=waybills,
+            waybill_tokens=tokens,
             waybill_missing_reason=data.get("waybill_missing_reason"),
         )
     except Exception as error:
         await event.message.answer(f"Не удалось сохранить вывоз: {error}")
         return
 
-    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), token)
+    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), tokens)
     sheet_error = None
     try:
         append_rows([row])
