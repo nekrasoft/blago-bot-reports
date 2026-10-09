@@ -20,6 +20,7 @@ from bunker_pickup import (
     MAX_SITE_PHOTOS,
     MAX_WAYBILLS,
     build_pickup_sheet_row,
+    pickup_confirmation,
     format_billing_units,
     pickup_group_key,
 )
@@ -658,12 +659,11 @@ async def waybill_reason_selected(update: Update, context: ContextTypes.DEFAULT_
 
 async def _show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     log = context.user_data.get("bunker_log", [])
-    lines = [f"• №{item.get('number', '?')} × {format_billing_units(item['billing_units'])}" for item in log]
-    text = (
-        f"Контрагент: {log[0].get('contractor', '')}\n"
-        + "\n".join(lines)
-        + f"\nФото: {len(context.user_data.get('bunker_site_photos', []))}"
-        + f"\nТалоны: {len(context.user_data.get('bunker_waybills', []))}"
+    text = pickup_confirmation(
+        log, context.user_data.get("bunker_cleanup_status", "not_required"),
+        context.user_data.get("bunker_cleanup_comment"),
+        context.user_data.get("bunker_site_photos", []), context.user_data.get("bunker_waybills", []),
+        context.user_data.get("bunker_waybill_missing_reason"),
     )
     if update.callback_query:
         await update.callback_query.edit_message_text(text, reply_markup=_confirm_keyboard())

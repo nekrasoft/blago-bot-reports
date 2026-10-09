@@ -63,3 +63,24 @@ def build_pickup_sheet_row(items: list[dict], date_str: str, waybill_tokens: lis
         format_billing_units(total_billing_units(items)),
         date_str,
     )
+
+
+def pickup_confirmation(items: list[dict], cleanup_status: str, cleanup_comment: str | None,
+                        photos: list[dict], waybills: list[dict], missing_reason: str | None) -> str:
+    first = items[0]
+    lines = [f"Контрагент: {first.get('contractor', '')}",
+             f"Площадка: {first.get('address') or first.get('note') or '—'}"]
+    lines.extend(f"• №{item.get('number', '?')} × {format_billing_units(item['billing_units'])}" for item in items)
+    volume = sum((Decimal(str(item.get('volume', 8))) * Decimal(str(item['billing_units']))
+                  for item in items), Decimal('0'))
+    cleanup = {'cleaned': 'Прибрана', 'not_required': 'Не требовалась', 'not_cleaned': 'Не прибрана'}
+    lines.extend([f"Вывезено: {len(items)} бункеров",
+                  f"К оплате: {format_billing_units(total_billing_units(items))} единиц",
+                  f"Расчётный объём: {format_billing_units(volume)} м³",
+                  f"Уборка: {cleanup.get(cleanup_status, 'Не указана')}"])
+    if cleanup_comment:
+        lines.append(f"Комментарий: {cleanup_comment}")
+    lines.extend([f"Фото: {len(photos)}", f"Талоны: {len(waybills)}"])
+    if not waybills and first.get('requiresContainerWaybill'):
+        lines.append(f"⚠️ Нет обязательного талона: {missing_reason or 'причина не указана'}")
+    return "\n".join(lines)

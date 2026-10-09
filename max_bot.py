@@ -39,6 +39,7 @@ from bunker_pickup import (
     MAX_SITE_PHOTOS,
     MAX_WAYBILLS,
     build_pickup_sheet_row,
+    pickup_confirmation,
     format_billing_units,
     pickup_group_key,
 )
@@ -1462,12 +1463,9 @@ async def _show_max_pickup_confirmation(
 ) -> None:
     data = await context.get_data()
     log = data.get("bunker_log", [])
-    lines = [f"• №{item.get('number', '?')} × {format_billing_units(item['billing_units'])}" for item in log]
-    text = (
-        f"Контрагент: {log[0].get('contractor', '')}\n"
-        + "\n".join(lines)
-        + f"\nФото: {len(data.get('site_photos', []))}"
-        + f"\nТалоны: {len(data.get('waybills', []))}"
+    text = pickup_confirmation(
+        log, data.get("cleanup_status", "not_required"), data.get("cleanup_comment"),
+        data.get("site_photos", []), data.get("waybills", []), data.get("waybill_missing_reason"),
     )
     await context.set_state(BunkerDialog.confirming)
     await event.message.answer(text, attachments=[_pickup_confirm_keyboard_max()])
