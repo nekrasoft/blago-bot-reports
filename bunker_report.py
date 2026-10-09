@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import logging
 import mimetypes
 import os
 
@@ -36,6 +37,8 @@ from map_client import (
 from sheets_client import append_rows
 from waybill_files_db import save_waybill_file
 from waybill_notes import generate_waybill_token
+
+logger = logging.getLogger(__name__)
 
 STATE_BUNKER = 0
 STATE_UNITS = 1
@@ -710,8 +713,7 @@ async def edit_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     section = query.data.split(":", 1)[1]
     if section == "items":
         context.user_data.update(bunker_log=[], bunker_selected_ids=set(), bunker_selected_keys=set())
-        context.user_data.pop("bunker_group_key", None)
-        await query.edit_message_text("Выберите бункеры заново:", reply_markup=_build_bunker_keyboard(mode="report"))
+        await query.edit_message_text("Выберите бункеры этой площадки заново:", reply_markup=_build_bunker_keyboard(mode="report", group_key=_selection_group(context)))
         return STATE_BUNKER
     if section == "cleanup":
         context.user_data.pop("bunker_cleanup_comment", None)
@@ -760,19 +762,21 @@ async def confirm_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             waybill_tokens=waybill_tokens,
             waybill_missing_reason=context.user_data.get("bunker_waybill_missing_reason"),
         )
-    except Exception as error:
-        await query.edit_message_text(f"Не удалось сохранить вывоз: {error}")
+    except Exception:
+        logger.exception("Не удалось сохранить отчёт о вывозе")
+        await query.edit_message_text("Не удалось сохранить вывоз. Данные отчёта сохранены. Попробуйте подтвердить ещё раз; если ошибка повторится, свяжитесь с диспетчером.", reply_markup=_confirm_keyboard())
         return STATE_CONFIRM
 
     row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), waybill_tokens)
     sheet_error = None
     try:
         append_rows([row])
-    except Exception as error:
-        sheet_error = str(error)
+    except Exception:
+        logger.exception("Не удалось записать вывоз в Google Sheets")
+        sheet_error = True
     report = _format_bunker_report(log)
     if sheet_error:
-        report += f"\n\n⚠️ Вывоз сохранён, но запись в Google Sheets не выполнена: {sheet_error}"
+        report += "\n\n⚠️ Вывоз сохранён, но не попал в расчётную таблицу. Сообщите диспетчеру — повторно отправлять отчёт не нужно."
     await query.edit_message_text(report)
     _clear_report(context)
     return ConversationHandler.END

@@ -1497,15 +1497,19 @@ async def _manage_max_pickup_file(event: MessageCallback, context: MemoryContext
                 attachments=[InputMediaBuffer(file["file_bytes"], filename=file["file_name"],
                              type="image" if file["content_type"].startswith("image/") else "file")],
             )
+    await event.message.delete()
     await _show_max_pickup_confirmation(event, context)
 
 
 async def _edit_max_pickup(event: MessageCallback, context: MemoryContext, section: str) -> None:
+    await event.message.delete()
     if section == "items":
-        await context.update_data(bunker_log=[], selected_ids=[], selected_keys=[], group_key=None)
+        await context.update_data(bunker_log=[], selected_ids=[], selected_keys=[])
         await context.set_state(BunkerDialog.selecting)
-        markup, _, _ = _build_bunker_keyboard_max(mode="report")
-        await event.message.answer("Выберите бункеры заново:", attachments=[markup])
+        data = await context.get_data()
+        group = data.get("group_key")
+        markup, _, _ = _build_bunker_keyboard_max(mode="report", group_key=tuple(group) if group else None)
+        await event.message.answer("Выберите бункеры этой площадки заново:", attachments=[markup])
     elif section == "cleanup":
         await context.update_data(cleanup_comment=None)
         await context.set_state(BunkerDialog.selecting_cleanup)
@@ -1561,19 +1565,21 @@ async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) 
             waybill_tokens=tokens,
             waybill_missing_reason=data.get("waybill_missing_reason"),
         )
-    except Exception as error:
-        await event.message.answer(f"Не удалось сохранить вывоз: {error}")
+    except Exception:
+        logger.exception("Не удалось сохранить отчёт о вывозе")
+        await event.message.answer("Не удалось сохранить вывоз. Данные отчёта сохранены. Попробуйте подтвердить ещё раз; если ошибка повторится, свяжитесь с диспетчером.")
         return
 
     row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), tokens)
     sheet_error = None
     try:
         append_rows([row])
-    except Exception as error:
-        sheet_error = str(error)
+    except Exception:
+        logger.exception("Не удалось записать вывоз в Google Sheets")
+        sheet_error = True
     report = _format_bunker_report(log)
     if sheet_error:
-        report += f"\n\n⚠️ Вывоз сохранён, но запись в Google Sheets не выполнена: {sheet_error}"
+        report += "\n\n⚠️ Вывоз сохранён, но не попал в расчётную таблицу. Сообщите диспетчеру — повторно отправлять отчёт не нужно."
     await context.clear()
     await event.message.delete()
     await event.message.answer(report)
