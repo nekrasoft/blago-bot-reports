@@ -587,13 +587,18 @@ def _max_chat_id(event: MessageCreated) -> int | None:
     return getattr(recipient, "chat_id", None)
 
 
-def _max_user_id(event: MessageCreated) -> int | None:
-    sender = getattr(event.message, "sender", None)
+def _max_user(event: MessageCreated | MessageCallback):
+    callback = getattr(event, "callback", None)
+    return getattr(callback, "user", None) or getattr(event.message, "sender", None)
+
+
+def _max_user_id(event: MessageCreated | MessageCallback) -> int | None:
+    sender = _max_user(event)
     return getattr(sender, "user_id", None)
 
 
-def _max_user_name(event: MessageCreated) -> str | None:
-    sender = getattr(event.message, "sender", None)
+def _max_user_name(event: MessageCreated | MessageCallback) -> str | None:
+    sender = _max_user(event)
     if sender is None:
         return None
     if isinstance(sender, dict):
