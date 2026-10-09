@@ -22,3 +22,12 @@ class PickupEditTest(unittest.IsolatedAsyncioTestCase):
         await max_bot._edit_max_pickup(event, context, 'cleanup')
         context.update_data.assert_awaited_once_with(cleanup_comment=None)
         context.set_state.assert_awaited_once_with(max_bot.BunkerDialog.selecting_cleanup)
+
+    async def test_removing_photo_keeps_other_attachments(self):
+        data = {'bunker_site_photos': [{'file_name': 'one'}, {'file_name': 'two'}],
+                'bunker_waybills': [{'file_name': 'ticket'}]}
+        query = SimpleNamespace(data='file:remove:photos:0', answer=AsyncMock())
+        with patch.object(bunker_report, '_show_confirmation', new=AsyncMock()):
+            await bunker_report.manage_pickup_file(SimpleNamespace(callback_query=query), SimpleNamespace(user_data=data))
+        self.assertEqual(data['bunker_site_photos'], [{'file_name': 'two'}])
+        self.assertEqual(data['bunker_waybills'], [{'file_name': 'ticket'}])

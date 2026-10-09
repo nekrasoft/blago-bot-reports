@@ -308,8 +308,11 @@ def _waybill_reason_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def _confirm_keyboard() -> InlineKeyboardMarkup:
+def _confirm_keyboard(files: list[tuple[str, int, str]] = ()) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        *[[InlineKeyboardButton(f"Посмотреть {label}", callback_data=f"file:view:{kind}:{index}"),
+           InlineKeyboardButton(f"Удалить {label}", callback_data=f"file:remove:{kind}:{index}")]
+          for kind, index, label in files],
         [InlineKeyboardButton("✅ Подтвердить вывоз", callback_data="confirm")],
         [InlineKeyboardButton("Изменить бункеры / количество", callback_data="edit:items")],
         [InlineKeyboardButton("Изменить уборку", callback_data="edit:cleanup")],
@@ -666,9 +669,39 @@ async def _show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         context.user_data.get("bunker_waybill_missing_reason"),
     )
     if update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=_confirm_keyboard())
+        await update.callback_query.edit_message_text(text, reply_markup=_confirm_keyboard([
+            (kind, index, f"{label} {index + 1}")
+            for kind, label, key in [("photos", "фото", "bunker_site_photos"), ("waybills", "талон", "bunker_waybills")]
+            for index, file in enumerate(context.user_data.get(key, []))
+        ]))
     elif update.message:
-        await update.message.reply_text(text, reply_markup=_confirm_keyboard())
+        await update.message.reply_text(text, reply_markup=_confirm_keyboard([
+            (kind, index, f"{label} {index + 1}")
+            for kind, label, key in [("photos", "фото", "bunker_site_photos"), ("waybills", "талон", "bunker_waybills")]
+            for index, file in enumerate(context.user_data.get(key, []))
+        ]))
+
+
+async def manage_pickup_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    _, action, kind, raw_index = query.data.split(":")
+    key = "bunker_site_photos" if kind == "photos" else "bunker_waybills"
+    files = context.user_data.get(key, [])
+    index = int(raw_index)
+    if index >= len(files):
+        await _show_confirmation(update, context)
+        return STATE_CONFIRM
+    if action == "remove":
+        files.pop(index)
+    else:
+        file = files[index]
+        if file["content_type"].startswith("image/"):
+            await query.message.reply_photo(file["file_bytes"], caption=f"{index + 1}: {file['file_name']}")
+        else:
+            await query.message.reply_document(file["file_bytes"], filename=file["file_name"])
+    await _show_confirmation(update, context)
+    return STATE_CONFIRM
 
 
 async def edit_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -775,6 +808,7 @@ def get_bunker_conversation_handler() -> ConversationHandler:
             ],
             STATE_WAYBILL_REASON: [CallbackQueryHandler(waybill_reason_selected, pattern=r"^waybill_reason:")],
             STATE_CONFIRM: [
+                CallbackQueryHandler(manage_pickup_file, pattern=r"^file:(view|remove):(photos|waybills):\d+$"),
                 CallbackQueryHandler(edit_pickup, pattern=r"^edit:(items|cleanup|photos|waybills)$"),
                 CallbackQueryHandler(confirm_pickup, pattern=r"^(confirm|cancel)$"),
             ],

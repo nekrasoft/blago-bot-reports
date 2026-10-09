@@ -24,6 +24,7 @@ from maxapi.types import (
     Command,
     MessageCallback,
     MessageCreated,
+    InputMediaBuffer,
 )
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
@@ -203,8 +204,11 @@ def _waybill_reason_keyboard_max():
     ])
 
 
-def _pickup_confirm_keyboard_max():
+def _pickup_confirm_keyboard_max(files=()):
     return _max_buttons([
+        *[[(f"Посмотреть {label}", f"file:view:{kind}:{index}"),
+           (f"Удалить {label}", f"file:remove:{kind}:{index}")]
+          for kind, index, label in files],
         [("✅ Подтвердить вывоз", "confirm")],
         [("Изменить бункеры / количество", "edit:items")],
         [("Изменить уборку", "edit:cleanup")],
@@ -336,7 +340,7 @@ WAYBILL_MAX_FILE_SIZE_BYTES_DEFAULT = 10 * 1024 * 1024
 WAYBILL_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 
 
-def _build_waybill_keyboard_max() -> object:
+def _build_pickup_waybill_keyboard_max() -> object:
     builder = InlineKeyboardBuilder()
     builder.row(CallbackButton(text="Пропустить путевой лист", payload="hfile_skip"))
     builder.row(CallbackButton(text="Отмена", payload="hcancel"))
@@ -1468,7 +1472,31 @@ async def _show_max_pickup_confirmation(
         data.get("site_photos", []), data.get("waybills", []), data.get("waybill_missing_reason"),
     )
     await context.set_state(BunkerDialog.confirming)
-    await event.message.answer(text, attachments=[_pickup_confirm_keyboard_max()])
+    await event.message.answer(text, attachments=[_pickup_confirm_keyboard_max([
+        (kind, index, f"{label} {index + 1}")
+        for kind, label, key in [("photos", "фото", "site_photos"), ("waybills", "талон", "waybills")]
+        for index, file in enumerate(data.get(key, []))
+    ])])
+
+
+async def _manage_max_pickup_file(event: MessageCallback, context: MemoryContext, payload: str) -> None:
+    _, action, kind, raw_index = payload.split(":")
+    key = "site_photos" if kind == "photos" else "waybills"
+    data = await context.get_data()
+    files = list(data.get(key, []))
+    index = int(raw_index)
+    if 0 <= index < len(files):
+        if action == "remove":
+            files.pop(index)
+            await context.update_data(**{key: files})
+        else:
+            file = files[index]
+            await event.message.answer(
+                f"{index + 1}: {file['file_name']}",
+                attachments=[InputMediaBuffer(file["file_bytes"], filename=file["file_name"],
+                             type="image" if file["content_type"].startswith("image/") else "file")],
+            )
+    await _show_max_pickup_confirmation(event, context)
 
 
 async def _edit_max_pickup(event: MessageCallback, context: MemoryContext, section: str) -> None:
@@ -1486,7 +1514,7 @@ async def _edit_max_pickup(event: MessageCallback, context: MemoryContext, secti
         await event.message.answer("Добавьте фото или продолжите с текущими:", attachments=[_photos_keyboard_max()])
     elif section == "waybills":
         await context.set_state(BunkerDialog.waiting_waybill)
-        await event.message.answer("Добавьте талоны или продолжите с текущими:", attachments=[_waybill_keyboard_max()])
+        await event.message.answer("Добавьте талоны или продолжите с текущими:", attachments=[_pickup_waybill_keyboard_max()])
 
 
 @dp.message_callback(BunkerDialog.confirming)
@@ -1494,6 +1522,9 @@ async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) 
     payload = event.callback.payload or ""
     if payload == "cancel":
         await _callback_cancel(event, context)
+        return
+    if re.fullmatch(r"file:(view|remove):(photos|waybills):\d+", payload):
+        await _manage_max_pickup_file(event, context, payload)
         return
     if payload.startswith("edit:"):
         await _edit_max_pickup(event, context, payload.split(":", 1)[1])
@@ -1656,7 +1687,7 @@ async def _ask_waybill_max(event: MessageCreated | MessageCallback, context: Mem
             "Загрузите путевой лист: фото или PDF подписанной мастером бумаги.\n"
             "Если путевого листа нет, нажмите «Пропустить путевой лист»."
         ),
-        attachments=[_build_waybill_keyboard_max()],
+        attachments=[_build_pickup_waybill_keyboard_max()],
     )
 
 
@@ -1785,7 +1816,7 @@ async def handle_hodka_file(event: MessageCreated, context: MemoryContext) -> No
     if not attachments:
         await event.message.answer(
             text="Отправьте фото или PDF путевого листа либо нажмите «Пропустить путевой лист».",
-            attachments=[_build_waybill_keyboard_max()],
+            attachments=[_build_pickup_waybill_keyboard_max()],
         )
         return
 
