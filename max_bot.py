@@ -205,6 +205,10 @@ def _waybill_reason_keyboard_max():
 def _pickup_confirm_keyboard_max():
     return _max_buttons([
         [("✅ Подтвердить вывоз", "confirm")],
+        [("Изменить бункеры / количество", "edit:items")],
+        [("Изменить уборку", "edit:cleanup")],
+        [("Изменить фото", "edit:photos")],
+        [("Изменить талоны", "edit:waybills")],
         [("Отмена", "cancel")],
     ])
 
@@ -1469,11 +1473,34 @@ async def _show_max_pickup_confirmation(
     await event.message.answer(text, attachments=[_pickup_confirm_keyboard_max()])
 
 
+async def _edit_max_pickup(event: MessageCallback, context: MemoryContext, section: str) -> None:
+    if section == "items":
+        await context.update_data(bunker_log=[], selected_ids=[], selected_keys=[], group_key=None)
+        await context.set_state(BunkerDialog.selecting)
+        markup, _, _ = _build_bunker_keyboard_max(mode="report")
+        await event.message.answer("Выберите бункеры заново:", attachments=[markup])
+    elif section == "cleanup":
+        await context.update_data(cleanup_comment=None)
+        await context.set_state(BunkerDialog.selecting_cleanup)
+        await event.message.answer("Была ли прибрана территория?", attachments=[_cleanup_keyboard_max()])
+    elif section == "photos":
+        await context.set_state(BunkerDialog.waiting_photos)
+        await event.message.answer("Добавьте фото или продолжите с текущими:", attachments=[_photos_keyboard_max()])
+    elif section == "waybills":
+        await context.set_state(BunkerDialog.waiting_waybill)
+        await event.message.answer("Добавьте талоны или продолжите с текущими:", attachments=[_waybill_keyboard_max()])
+
+
 @dp.message_callback(BunkerDialog.confirming)
 async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) -> None:
     payload = event.callback.payload or ""
     if payload == "cancel":
         await _callback_cancel(event, context)
+        return
+    if payload.startswith("edit:"):
+        await _edit_max_pickup(event, context, payload.split(":", 1)[1])
+        return
+    if payload != "confirm":
         return
     data = await context.get_data()
     log = data.get("bunker_log", [])

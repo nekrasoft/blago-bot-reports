@@ -310,6 +310,10 @@ def _waybill_reason_keyboard() -> InlineKeyboardMarkup:
 def _confirm_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("✅ Подтвердить вывоз", callback_data="confirm")],
+        [InlineKeyboardButton("Изменить бункеры / количество", callback_data="edit:items")],
+        [InlineKeyboardButton("Изменить уборку", callback_data="edit:cleanup")],
+        [InlineKeyboardButton("Изменить фото", callback_data="edit:photos")],
+        [InlineKeyboardButton("Изменить талоны", callback_data="edit:waybills")],
         [InlineKeyboardButton("Отмена", callback_data=CANCEL)],
     ])
 
@@ -667,6 +671,26 @@ async def _show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(text, reply_markup=_confirm_keyboard())
 
 
+async def edit_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    section = query.data.split(":", 1)[1]
+    if section == "items":
+        context.user_data.update(bunker_log=[], bunker_selected_ids=set(), bunker_selected_keys=set())
+        context.user_data.pop("bunker_group_key", None)
+        await query.edit_message_text("Выберите бункеры заново:", reply_markup=_build_bunker_keyboard(mode="report"))
+        return STATE_BUNKER
+    if section == "cleanup":
+        context.user_data.pop("bunker_cleanup_comment", None)
+        await query.edit_message_text("Была ли прибрана территория?", reply_markup=_cleanup_keyboard())
+        return STATE_CLEANUP
+    if section == "photos":
+        await query.edit_message_text("Добавьте фото или продолжите с текущими:", reply_markup=_photos_keyboard())
+        return STATE_PHOTOS
+    await query.edit_message_text("Добавьте талоны или продолжите с текущими:", reply_markup=_waybill_keyboard())
+    return STATE_WAYBILL
+
+
 async def confirm_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query:
@@ -750,7 +774,10 @@ def get_bunker_conversation_handler() -> ConversationHandler:
                 CallbackQueryHandler(waybill_skipped, pattern=r"^(waybill_done|waybill_skip|cancel)$"),
             ],
             STATE_WAYBILL_REASON: [CallbackQueryHandler(waybill_reason_selected, pattern=r"^waybill_reason:")],
-            STATE_CONFIRM: [CallbackQueryHandler(confirm_pickup, pattern=r"^(confirm|cancel)$")],
+            STATE_CONFIRM: [
+                CallbackQueryHandler(edit_pickup, pattern=r"^edit:(items|cleanup|photos|waybills)$"),
+                CallbackQueryHandler(confirm_pickup, pattern=r"^(confirm|cancel)$"),
+            ],
         },
         fallbacks=[CommandHandler("cancel", _cancel)],
         per_message=False,
