@@ -15,4 +15,6 @@ if __name__ == "__main__":
         from max_bot import main
     else:
         from bot import main
+    from pickup_delivery import start_delivery_worker
+    start_delivery_worker()
     main()

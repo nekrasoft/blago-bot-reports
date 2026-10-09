@@ -39,7 +39,6 @@ from bunker_report import (
 from bunker_pickup import (
     MAX_SITE_PHOTOS,
     MAX_WAYBILLS,
-    build_pickup_sheet_row,
     pickup_confirmation,
     format_billing_units,
     pickup_group_key,
@@ -57,13 +56,14 @@ from driver_work_time_db import (
 )
 from driver_work_time_periods import format_month, get_month_range
 from map_client import (
-    create_pickup_report,
+    PickupReportRejected,
     get_bunker_log_entry,
     get_bunker_identity_key,
     get_trip_removal_counterparties,
     mark_bunker_filled,
 )
 from persistent_context import PersistentMaxContext
+from pickup_submission import prepare_submission, send_submission, submission_identity
 from sheets_client import append_rows
 from waybill_files_db import save_waybill_file
 from waybill_notes import format_note_with_waybill_token, generate_waybill_token
@@ -1143,6 +1143,10 @@ async def _save_driver_time_end(
 async def _start_bunker_dialog(
     event: MessageCreated, context: MemoryContext, mode: str
 ) -> None:
+    data = await context.get_data()
+    if data.get("submission"):
+        await event.message.answer("Сначала подтвердите предыдущий отчёт.", attachments=[_pickup_confirm_keyboard_max()])
+        return
     available = [b for b in _filter_bunkers_by_mode(_get_sorted_bunkers(), mode) if b.get("id")]
     if not available:
         text = "Нет бункеров без активной заявки." if mode == "request" else "Нет активных заявок на вывоз."
@@ -1468,6 +1472,8 @@ async def _show_max_pickup_confirmation(
 ) -> None:
     data = await context.get_data()
     log = data.get("bunker_log", [])
+    if not data.get("submission_key"):
+        await context.update_data(submission_key=submission_identity(data))
     text = pickup_confirmation(
         log, data.get("cleanup_status", "not_required"), data.get("cleanup_comment"),
         data.get("site_photos", []), data.get("waybills", []), data.get("waybill_missing_reason"),
@@ -1525,6 +1531,10 @@ async def _edit_max_pickup(event: MessageCallback, context: MemoryContext, secti
 @dp.message_callback(BunkerDialog.confirming)
 async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) -> None:
     payload = event.callback.payload or ""
+    data = await context.get_data()
+    if data.get("submission") and payload != "confirm":
+        await event.message.answer("Отчёт уже отправляется. Повторите подтверждение.")
+        return
     if payload == "cancel":
         await _callback_cancel(event, context)
         return
@@ -1538,48 +1548,24 @@ async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) 
         return
     data = await context.get_data()
     log = data.get("bunker_log", [])
-    waybills = data.get("waybills", [])
-    tokens = [generate_waybill_token() for _ in waybills]
-    try:
-        for waybill, token in zip(waybills, tokens, strict=True):
-            save_waybill_file(
-                file_token=token,
-                source="max",
-                file_bytes=waybill["file_bytes"],
-                source_chat_id=_max_chat_id(event),
-                source_user_id=_max_user_id(event),
-                source_message_id=_max_message_id(event),
-                source_file_id=waybill.get("source_file_id"),
-                file_name=waybill.get("file_name"),
-                content_type=waybill.get("content_type"),
-            )
-        create_pickup_report(
-            items=[{"bunkerId": item["id"], "billingUnits": item["billing_units"]} for item in log],
-            cleanup_status=data.get("cleanup_status", "not_required"),
-            cleanup_comment=data.get("cleanup_comment"),
-            driver_source="max",
-            driver_user_id=_max_user_id(event) or "unknown",
-            driver_name=_max_user_name(event),
-            site_photos=data.get("site_photos", []),
-            waybills=waybills,
-            waybill_tokens=tokens,
-            waybill_missing_reason=data.get("waybill_missing_reason"),
-        )
-    except Exception:
-        logger.exception("Не удалось сохранить отчёт о вывозе")
-        await event.message.answer("Не удалось сохранить вывоз. Данные отчёта сохранены. Попробуйте подтвердить ещё раз; если ошибка повторится, свяжитесь с диспетчером.")
+    if not log:
         return
-
-    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), tokens)
-    sheet_error = None
+    submission = prepare_submission(data, source="max", user_id=_max_user_id(event), name=_max_user_name(event),
+        chat_id=_max_chat_id(event), message_id=_max_message_id(event))
+    await context.update_data(submission=submission)
     try:
-        append_rows([row])
+        await asyncio.to_thread(send_submission, submission)
+    except PickupReportRejected:
+        logger.exception("API отклонило отчёт о вывозе")
+        await context.update_data(submission=None)
+        await event.message.answer("Отчёт не принят. Проверьте выбранные заявки и данные отчёта; если заявки уже выполнены, уточните у диспетчера.")
+        return
     except Exception:
-        logger.exception("Не удалось записать вывоз в Google Sheets")
-        sheet_error = True
+        logger.exception("Не удалось подтвердить сохранение вывоза")
+        await event.message.answer("Не удалось получить подтверждение. Данные сохранены — нажмите «Подтвердить» повторно: дубликат вывоза не создастся.")
+        return
     report = _format_bunker_report(log)
-    if sheet_error:
-        report += "\n\n⚠️ Вывоз сохранён, но не попал в расчётную таблицу. Сообщите диспетчеру — повторно отправлять отчёт не нужно."
+    report += "\n\nЗапись в расчётную таблицу поставлена в очередь. Если таблица недоступна, доставка повторится автоматически."
     await context.clear()
     await event.message.delete()
     await event.message.answer(report)

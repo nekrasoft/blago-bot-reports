@@ -100,9 +100,15 @@ def get_counterparties() -> list[dict]:
         return []
 
 
+class PickupReportRejected(RuntimeError):
+    """The server rejected the report without creating a new pickup."""
+
+
 def create_pickup_report(
     *,
     items: list[dict],
+    submission_key: str | None = None,
+    sheet_row: dict | None = None,
     cleanup_status: str,
     cleanup_comment: str | None,
     driver_source: str,
@@ -120,6 +126,8 @@ def create_pickup_report(
 
     payload = {
         "items": items,
+        "submissionKey": submission_key,
+        "sheetRow": sheet_row,
         "cleanupStatus": cleanup_status,
         "cleanupComment": cleanup_comment,
         "driverSource": driver_source,
@@ -164,8 +172,12 @@ def create_pickup_report(
             message = response.json().get("error")
         except Exception:
             message = None
-        raise RuntimeError(message or f"API карты вернуло HTTP {response.status_code}")
-    return response.json()
+        error_type = PickupReportRejected if response.status_code in (400, 409) else RuntimeError
+        raise error_type(message or f"API карты вернуло HTTP {response.status_code}")
+    result = response.json()
+    if sheet_row is not None and not result.get("sheetQueued"):
+        raise RuntimeError("API карты не подтвердило постановку записи в очередь")
+    return result
 
 
 def get_trip_removal_counterparties() -> list[dict]:

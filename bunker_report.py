@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+import asyncio
 import logging
 import mimetypes
 import os
+
+from pickup_submission import prepare_submission, send_submission, submission_identity
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -20,23 +23,19 @@ from telegram.ext import (
 from bunker_pickup import (
     MAX_SITE_PHOTOS,
     MAX_WAYBILLS,
-    build_pickup_sheet_row,
     pickup_confirmation,
     format_billing_units,
     pickup_group_key,
 )
 
 from map_client import (
-    create_pickup_report,
+    PickupReportRejected,
     dedupe_bunker_items,
     get_all_bunkers,
     get_bunker_log_entry,
     get_bunker_identity_key,
     mark_bunker_filled,
 )
-from sheets_client import append_rows
-from waybill_files_db import save_waybill_file
-from waybill_notes import generate_waybill_token
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +331,12 @@ def _clear_report(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get("bunker_submission"):
+        if update.callback_query:
+            await update.callback_query.answer("Отчёт уже отправляется. Повторите подтверждение.", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("Отчёт уже отправляется. Повторите подтверждение.")
+        return STATE_CONFIRM
     query = update.callback_query
     _clear_report(context)
     if query:
@@ -350,6 +355,10 @@ def _selection_group(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str] | No
 async def _bunker_start_impl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message:
         return ConversationHandler.END
+    if context.user_data.get("bunker_submission"):
+        await update.message.reply_text("Сначала подтвердите предыдущий отчёт.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Повторить подтверждение", callback_data="confirm")]]))
+        return STATE_CONFIRM
     _clear_report(context)
     mode = context.user_data.get("bunker_mode", "report")
     available = [b for b in _filter_bunkers_by_mode(_get_sorted_bunkers(), mode) if b.get("id")]
@@ -664,6 +673,7 @@ async def waybill_reason_selected(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def _show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.user_data.setdefault("bunker_submission_key", submission_identity({}))
     log = context.user_data.get("bunker_log", [])
     text = pickup_confirmation(
         log, context.user_data.get("bunker_cleanup_status", "not_required"),
@@ -686,6 +696,9 @@ async def _show_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def manage_pickup_file(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get("bunker_submission"):
+        await update.callback_query.answer("Отчёт уже отправляется. Повторите подтверждение.", show_alert=True)
+        return STATE_CONFIRM
     query = update.callback_query
     await query.answer()
     _, action, kind, raw_index = query.data.split(":")
@@ -708,6 +721,9 @@ async def manage_pickup_file(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def edit_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if context.user_data.get("bunker_submission"):
+        await update.callback_query.answer("Отчёт уже отправляется. Повторите подтверждение.", show_alert=True)
+        return STATE_CONFIRM
     query = update.callback_query
     await query.answer()
     section = query.data.split(":", 1)[1]
@@ -734,49 +750,33 @@ async def confirm_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return await _cancel(update, context)
     await query.answer()
     log = context.user_data.get("bunker_log", [])
-    waybills = context.user_data.get("bunker_waybills", [])
-    waybill_tokens = [generate_waybill_token() for _ in waybills]
+    if not log:
+        return ConversationHandler.END
     user = update.effective_user
+    data = {"submission_key": context.user_data.setdefault("bunker_submission_key", submission_identity({})), "bunker_log": log,
+            **{key: context.user_data.get("bunker_" + key) for key in
+               ["cleanup_status", "cleanup_comment", "site_photos", "waybills", "waybill_missing_reason"]}}
+    data["submission"] = context.user_data.get("bunker_submission")
+    submission = prepare_submission(data, source="telegram", user_id=user.id, name=user.full_name,
+        chat_id=update.effective_chat.id)
+    context.user_data["bunker_submission"] = submission
+    context.application.mark_data_for_update_persistence(user_ids=user.id)
+    await context.application.update_persistence()
+    await context.application.persistence.flush()
     try:
-        for waybill, waybill_token in zip(waybills, waybill_tokens, strict=True):
-            save_waybill_file(
-                file_token=waybill_token,
-                source="telegram",
-                file_bytes=waybill["file_bytes"],
-                source_chat_id=update.effective_chat.id if update.effective_chat else None,
-                source_user_id=user.id if user else None,
-                source_message_id=waybill.get("source_message_id"),
-                source_file_id=waybill.get("source_file_id"),
-                file_name=waybill.get("file_name"),
-                content_type=waybill.get("content_type"),
-            )
-        create_pickup_report(
-            items=[{"bunkerId": item["id"], "billingUnits": item["billing_units"]} for item in log],
-            cleanup_status=context.user_data.get("bunker_cleanup_status", "not_required"),
-            cleanup_comment=context.user_data.get("bunker_cleanup_comment"),
-            driver_source="telegram",
-            driver_user_id=user.id if user else "unknown",
-            driver_name=user.full_name if user else None,
-            site_photos=context.user_data.get("bunker_site_photos", []),
-            waybills=waybills,
-            waybill_tokens=waybill_tokens,
-            waybill_missing_reason=context.user_data.get("bunker_waybill_missing_reason"),
-        )
-    except Exception:
-        logger.exception("Не удалось сохранить отчёт о вывозе")
-        await query.edit_message_text("Не удалось сохранить вывоз. Данные отчёта сохранены. Попробуйте подтвердить ещё раз; если ошибка повторится, свяжитесь с диспетчером.", reply_markup=_confirm_keyboard())
+        await asyncio.to_thread(send_submission, submission)
+    except PickupReportRejected:
+        logger.exception("API отклонило отчёт о вывозе")
+        context.user_data.pop("bunker_submission", None)
+        await query.edit_message_text("Отчёт не принят. Проверьте выбранные заявки и данные отчёта; если заявки уже выполнены, уточните у диспетчера.", reply_markup=_confirm_keyboard())
         return STATE_CONFIRM
-
-    row = build_pickup_sheet_row(log, datetime.now().strftime("%d.%m.%Y"), waybill_tokens)
-    sheet_error = None
-    try:
-        append_rows([row])
     except Exception:
-        logger.exception("Не удалось записать вывоз в Google Sheets")
-        sheet_error = True
+        logger.exception("Не удалось подтвердить сохранение вывоза")
+        await query.edit_message_text("Не удалось получить подтверждение. Данные сохранены — нажмите повторно: дубликат вывоза не создастся.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Повторить подтверждение", callback_data="confirm")]]))
+        return STATE_CONFIRM
     report = _format_bunker_report(log)
-    if sheet_error:
-        report += "\n\n⚠️ Вывоз сохранён, но не попал в расчётную таблицу. Сообщите диспетчеру — повторно отправлять отчёт не нужно."
+    report += "\n\nЗапись в расчётную таблицу поставлена в очередь. Если таблица недоступна, доставка повторится автоматически."
     await query.edit_message_text(report)
     _clear_report(context)
     return ConversationHandler.END

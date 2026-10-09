@@ -4,6 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pickup_submission
+
 with patch("maxapi.Bot"):
     import max_bot
 
@@ -40,10 +42,11 @@ class MaxDriverIdentityTest(unittest.IsolatedAsyncioTestCase):
                 }],
             }),
             clear=AsyncMock(),
+            update_data=AsyncMock(),
         )
 
         with (
-            patch.object(max_bot, "create_pickup_report") as create_report,
+            patch.object(pickup_submission, "create_pickup_report") as create_report,
             patch.object(max_bot, "append_rows"),
             patch.object(max_bot, "_format_bunker_report", return_value="Сохранено"),
         ):
