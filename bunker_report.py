@@ -814,6 +814,8 @@ def get_bunker_conversation_handler() -> ConversationHandler:
             ],
         },
         fallbacks=[CommandHandler("cancel", _cancel)],
+        name="bunker_pickup",
+        persistent=True,
         per_message=False,
         per_chat=False,
         per_user=True,

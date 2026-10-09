@@ -8,10 +8,11 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, ContextTypes, ChatMemberHandler
+from telegram.ext import Application, ContextTypes, ChatMemberHandler, PicklePersistence
 
 from bunker_report import get_bunker_conversation_handler
 from trip_report import get_hodka_conversation_handler
+from persistent_context import state_directory
 
 # Загрузка переменных окружения
 load_dotenv(Path(__file__).resolve().parent / ".env")
@@ -90,7 +91,10 @@ def main() -> None:
     if not token:
         raise ValueError("Задайте TELEGRAM_BOT_TOKEN в .env")
 
-    application = Application.builder().token(token).build()
+    persistence_path = state_directory() / "telegram.pickle"
+    application = Application.builder().token(token).persistence(
+        PicklePersistence(filepath=persistence_path, update_interval=1)
+    ).build()
     application.add_handler(
         ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
     )

@@ -5,3 +5,5 @@ __pycache__/
 .venv/
 venv/
 data/processed_messages.json
+
+data/private-state/

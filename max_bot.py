@@ -63,6 +63,7 @@ from map_client import (
     get_trip_removal_counterparties,
     mark_bunker_filled,
 )
+from persistent_context import PersistentMaxContext
 from sheets_client import append_rows
 from waybill_files_db import save_waybill_file
 from waybill_notes import format_note_with_waybill_token, generate_waybill_token
@@ -799,7 +800,7 @@ async def _append_hodka_report_max(
 
 
 bot = Bot(token=os.environ.get("MAX_BOT_TOKEN", ""))
-dp = Dispatcher()
+dp = Dispatcher(storage=PersistentMaxContext)
 
 
 @dp.bot_added()
