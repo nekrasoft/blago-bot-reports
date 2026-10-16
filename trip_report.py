@@ -285,7 +285,7 @@ async def hodka_select_site(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if query.data == HODKA_CANCEL:
         return await _cancel_hodka_callback(update, context)
     if query.data == "hsite:manual":
-        await query.edit_message_text("Введите площадку в формате: район; адрес. Например: Знак; ул. Дмитрия Козулева, 10к1")
+        await query.edit_message_text("Введите адрес или район площадки одной строкой. Например: Производственная, 21")
         return STATE_HODKA_SITE
     try:
         site = context.user_data['hodka_sites'][int(query.data.split(':')[1])]

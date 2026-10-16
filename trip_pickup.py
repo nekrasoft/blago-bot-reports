@@ -95,13 +95,10 @@ def trip_sites(counterparty_id) -> list[dict]:
 
 
 def manual_site(text: str) -> dict:
-    parts = text.split(';', 1)
-    if len(parts) != 2 or not all(part.strip() for part in parts):
-        raise ValueError('Введите район и адрес через «;», например: Знак; ул. Дмитрия Козулева, 10к1')
-    district, address = [part.strip() for part in parts]
-    if len(district) > 255 or len(address) > 500:
-        raise ValueError('Район — до 255 символов, адрес — до 500.')
-    return {'district': district, 'address': address}
+    address = text.strip()
+    if not address or len(address) > 500:
+        raise ValueError('Введите адрес или район площадки одной строкой, до 500 символов.')
+    return {'district': '', 'address': address}
 
 
 def add_trip_photos(data: dict, files: list[dict]) -> int:
@@ -133,7 +130,7 @@ def confirmation_payload(data: dict) -> str:
 def trip_summary(data: dict) -> str:
     site = data['hodka_site']
     text = (f"Ходки: {data['hodka_selected_contractor']}\n"
-            f"Площадка: {site['district']}, {site['address']}\n"
+            f"Площадка: {', '.join(filter(None, (site['district'], site['address'])))}\n"
             f"Количество ходок: {data['hodka_trips_count']}\n{data['hodka_volume_note']}\n"
             f"Фото: {len(data.get('hodka_photos') or [])}\n"
             f"Путевой лист: {'приложен' if data.get('hodka_waybill') else 'не приложен'}")
@@ -151,7 +148,7 @@ def prepare_trip_submission(data: dict, *, source, user_id, name, chat_id, messa
     if not data.get('hodka_counterparty_id'):
         raise ValueError('Не выбран контрагент. Запустите /h заново.')
     site = data['hodka_site']
-    note = f"{data['hodka_volume_note']}, {site['district']}, {site['address']}"
+    note = ', '.join(filter(None, (data['hodka_volume_note'], site['district'], site['address'])))
     row = _build_trip_row(data['hodka_selected_contractor'], data['hodka_trips_count'], data['hodka_date_str'], note,
                           cash_income=data.get('hodka_cash_income') or None)
     draft = {'site_photos': data.get('hodka_photos') or [],

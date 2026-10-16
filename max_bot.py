@@ -748,7 +748,7 @@ async def handle_hodka_site_callback(event, context):
         await event.message.answer("Отменено.")
         return
     if payload == 'hsite:manual':
-        await event.message.answer("Введите площадку: район; адрес. Например: Знак; ул. Дмитрия Козулева, 10к1")
+        await event.message.answer("Введите адрес или район площадки одной строкой. Например: Производственная, 21")
         return
     data = await context.get_data()
     try:

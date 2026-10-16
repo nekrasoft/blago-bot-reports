@@ -50,10 +50,20 @@ class TripPickupTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             add_trip_photos({}, [{'source_file_id': 'pdf', 'content_type': 'application/pdf'}])
 
-    def test_site_requires_district_and_address(self):
-        self.assertEqual(manual_site(' Знак ; Площадка 1 '), {'district': 'Знак', 'address': 'Площадка 1'})
-        with self.assertRaises(ValueError):
-            manual_site('Без района')
+    def test_site_accepts_address_or_district_as_one_line(self):
+        for text in ('Производственная 21', 'Знак', 'Знак; Площадка 1'):
+            self.assertEqual(manual_site(f' {text} '), {'district': '', 'address': text})
+        for text in ('   ', 'а' * 501):
+            with self.assertRaises(ValueError):
+                manual_site(text)
+
+    def test_manual_site_is_saved_without_empty_separator(self):
+        data = trip_data()
+        data['hodka_site'] = manual_site('Производственная 21')
+        submission = prepare_trip_submission(data, source='telegram', user_id=42, name='Водитель', chat_id=1)
+        self.assertIn('Производственная 21', submission['row']['Примечание'])
+        self.assertNotIn(', ,', submission['row']['Примечание'])
+
 
 
 class TripConfirmationTest(unittest.IsolatedAsyncioTestCase):
