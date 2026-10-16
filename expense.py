@@ -59,7 +59,7 @@ def prepare_expense(data: dict, *, source: str, user_id, name: str | None, now=N
     row = {'Дата': date.strftime('%d.%m.%Y'), 'Месяц': str(date.month),
            'Структура': STRUCTURE_NAME, 'КСП': STRUCTURE_CODE, 'Операция': CATEGORIES[category], 'КСЗ': category,
            'Контрагент': '', 'Примечание': data['expense_purpose'], 'Расход': amount, 'Приход': '',
-           'Объект': '', 'Выручка': '', '_skip_formula_columns': ['Выручка'], '_formula_columns': ['Месяц', 'Сальдо']}
+           'Объект': '', 'Выручка': '', '_skip_formula_columns': ['Выручка'], '_formula_columns': ['Месяц']}
     submission = {'key': data.setdefault('expense_key', str(uuid4())), 'source': source,
                   'user_id': str(user_id), 'driver_name': name, 'row': row}
     data['expense_submission'] = deepcopy(submission)

@@ -27,11 +27,13 @@ class Sheet:
         for request in body['requests']:
             if 'insertDimension' in request:
                 index = request['insertDimension']['range']['startIndex']
-                self.rows.insert(index, [''] * 5)
+                self.rows.insert(index, [''] * len(self.rows[0]))
                 self.appends += 1
             elif 'updateCells' in request:
                 update = request['updateCells']
-                self.rows[update['start']['rowIndex']] = [next(iter(cell['userEnteredValue'].values())) for cell in update['rows'][0]['values']]
+                values = [next(iter(cell['userEnteredValue'].values())) for cell in update['rows'][0]['values']]
+                start = update['start']['columnIndex']
+                self.rows[update['start']['rowIndex']][start:start + len(values)] = values
             elif 'copyPaste' in request:
                 copy = request['copyPaste']
                 source, target = copy['source'], copy['destination']

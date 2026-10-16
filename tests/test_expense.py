@@ -78,14 +78,22 @@ class ExpenseTest(unittest.TestCase):
         sheet.fail_append=True
         schema={'google_sheet_url':'https://docs.google.com/spreadsheets/d/sheet/edit#gid=7','google_sheet_columns':columns,'formula_columns':['Месяц','Выручка']}
         submission=prepare_expense(expense_data(),source='telegram',user_id=42,name='Водитель')
-        with patch('pickup_delivery.get_sheets_client',return_value=sheet),patch('pickup_delivery._load_schema',return_value=schema):
+        submission['row']['_formula_columns'] = ['Месяц', 'Сальдо']  # Older queued expense.
+        with patch.object(sheet, 'batch_update', wraps=sheet.batch_update) as batch, patch('pickup_delivery.get_sheets_client',return_value=sheet),patch('pickup_delivery._load_schema',return_value=schema):
             with self.assertRaises(TimeoutError):
                 append_pickup_row(submission['row'],submission['key'],marker_kind='РАСХОД')
             append_pickup_row(submission['row'],submission['key'],marker_kind='РАСХОД')
+        for request in batch.call_args.args[0]['requests']:
+            if 'updateCells' in request:
+                update = request['updateCells']
+                start = update['start']['columnIndex']
+                self.assertNotIn(7, range(start, start + len(update['rows'][0]['values'])))
+            if 'copyPaste' in request:
+                self.assertNotEqual(request['copyPaste']['destination']['startColumnIndex'], 7)
         self.assertEqual(sheet.appends,1)
         self.assertEqual(sheet.rows[-1][5],4000.0)
         self.assertEqual(sheet.rows[-1][3:5],['',''])
-        self.assertTrue(sheet.rows[-1][7].startswith('='))
+        self.assertEqual(sheet.rows[-1][7], '')
         self.assertIn('[РАСХОД:',sheet.rows[-1][2])
 
     def test_whitelist_is_checked_for_expenses(self):

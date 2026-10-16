@@ -50,14 +50,18 @@ def append_pickup_row(row: dict, submission_key: str, *, marker_kind: str = 'В�
     requests = [
         {'insertDimension': {'range': dict(sheetId=worksheet.id, dimension='ROWS', startIndex=destination, endIndex=destination + 1),
                              'inheritFromBefore': True}},
-        {'updateCells': {'start': dict(sheetId=worksheet.id, rowIndex=destination, columnIndex=0),
-                         'rows': [{'values': cells}], 'fields': 'userEnteredValue'}},
         {'repeatCell': {'range': dict(area, startColumnIndex=columns.index('Дата'), endColumnIndex=columns.index('Дата') + 1),
                         'cell': {'userEnteredFormat': {'numberFormat': {'type': 'DATE', 'pattern': 'dd.mm.yyyy'}}},
                         'fields': 'userEnteredFormat.numberFormat'}},
     ]
+    # Expenses must leave the sheet-managed balance untouched, including queued older payloads.
+    balance = columns.index('Сальдо') if marker_kind == 'РАСХОД' and 'Сальдо' in columns else len(columns)
+    for start, end in ((0, balance), (balance + 1, len(columns))):
+        if start < end:
+            requests.append({'updateCells': {'start': dict(sheetId=worksheet.id, rowIndex=destination, columnIndex=start),
+                                             'rows': [{'values': cells[start:end]}], 'fields': 'userEnteredValue'}})
     for name in row.get('_formula_columns', schema.get('formula_columns', ['Месяц', 'Выручка'])):
-        if name not in columns or name in row.get('_skip_formula_columns', []):
+        if name not in columns or name in row.get('_skip_formula_columns', []) or (marker_kind == 'РАСХОД' and name == 'Сальдо'):
             continue
         column = columns.index(name)
         letter = _col_letter(column + 1)
