@@ -17,7 +17,7 @@ from test_pickup_delivery import Sheet
 
 
 def expense_data():
-    return {'expense_structure': '1202', 'expense_category': '182', 'expense_amount': '4000', 'expense_purpose': 'б/у колесо'}
+    return {'expense_category': '182', 'expense_amount': '4000', 'expense_purpose': 'б/у колесо'}
 
 
 class ExpenseTest(unittest.TestCase):
@@ -31,6 +31,18 @@ class ExpenseTest(unittest.TestCase):
             self.assertEqual(row[field], '')
         data['expense_amount'] = '9999'
         self.assertIs(prepare_expense(data, source='telegram', user_id=42, name='Другой'), first)
+
+    def test_only_allowed_categories_and_fixed_structure(self):
+        for category in ('182', '117', '185'):
+            data = expense_data()
+            data.update(expense_category=category, expense_structure='1201')
+            row = prepare_expense(data, source='telegram', user_id=42, name='Водитель')['row']
+            self.assertEqual((row['КСП'], row['Структура']), ('1202', 'ЮЛ - Контейнеры'))
+        for category in ('183', '115', '124', '149', 'other'):
+            data = expense_data()
+            data['expense_category'] = category
+            with self.assertRaises(ValueError):
+                prepare_expense(data, source='telegram', user_id=42, name='Водитель')
 
     def test_amount_validation(self):
         for value in ['4 000,50','4\u00a0000.50','4000,5']:
@@ -99,9 +111,7 @@ class ExpenseDialogsTest(unittest.IsolatedAsyncioTestCase):
         event=SimpleNamespace(message=message,effective_message=message,effective_chat=SimpleNamespace(id=1),effective_user=SimpleNamespace(id=42,full_name='Водитель'),
             callback_query=SimpleNamespace(data='',answer=AsyncMock(),edit_message_text=AsyncMock()))
         with patch.dict('os.environ',{'ALLOWED_CHAT_IDS':''}),patch('expense_report.enqueue_expense',side_effect=[TimeoutError(),None]) as enqueue,patch('expense_report.logger'):
-            self.assertEqual(await expense_report.start(event,context),expense_report.STRUCTURE)
-            event.callback_query.data='mstructure:1202';await expense_report.choose(event,context)
-            event.callback_query.data='mcategory:other';await expense_report.choose(event,context)
+            self.assertEqual(await expense_report.start(event,context),expense_report.CATEGORY)
             event.callback_query.data='mcategory:182';await expense_report.choose(event,context)
             message.text='4000';await expense_report.amount(event,context)
             message.text='б/у колесо';await expense_report.purpose(event,context)
@@ -123,7 +133,6 @@ class ExpenseDialogsTest(unittest.IsolatedAsyncioTestCase):
         with patch.dict('os.environ',{'ALLOWED_CHAT_IDS':''}),patch('expense_max.enqueue_expense',side_effect=[TimeoutError(),None]) as enqueue,patch('expense_max.logger'):
             h=router.handlers
             await h['expense_start'](event,context)
-            event.callback.payload='mstructure:1202';await h['expense_choose'](event,context)
             event.callback.payload='mcategory:182';await h['expense_choose'](event,context)
             event.message.body.text='4000';await h['expense_text'](event,context)
             event.message.body.text='б/у колесо';await h['expense_text'](event,context)

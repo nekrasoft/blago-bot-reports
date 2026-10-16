@@ -8,14 +8,13 @@ from maxapi.context import State, StatesGroup
 from maxapi.types import CallbackButton, Command
 from maxapi.utils.inline_keyboard import InlineKeyboardBuilder
 
-from expense import STRUCTURES, CATEGORIES, PRIMARY_CATEGORIES, parse_amount, set_purpose, expense_summary, confirmation_payload, prepare_expense, expense_chat_allowed
+from expense import CATEGORIES, parse_amount, set_purpose, expense_summary, confirmation_payload, prepare_expense, expense_chat_allowed
 from expense_outbox import enqueue_expense
 
 logger = logging.getLogger(__name__)
 
 
 class ExpenseDialog(StatesGroup):
-    structure = State()
     category = State()
     amount = State()
     purpose = State()
@@ -48,10 +47,9 @@ def register_expense_handlers(dp, *, user_id, user_name, chat_id):
     async def expense_start(event, context):
         """Расход: сумма потраченных денег и назначение."""
         await context.clear()
-        await context.set_state(ExpenseDialog.structure)
-        await event.message.answer('Расход. Выберите структуру:', attachments=[keyboard([(v, 'mstructure:'+k) for k, v in STRUCTURES.items()])])
+        await context.set_state(ExpenseDialog.category)
+        await event.message.answer('Расход. Выберите категорию:', attachments=[keyboard([(v, 'mcategory:'+k) for k, v in CATEGORIES.items()])])
 
-    @dp.message_callback(ExpenseDialog.structure)
     @dp.message_callback(ExpenseDialog.category)
     @protected
     async def expense_choose(event, context):
@@ -61,14 +59,7 @@ def register_expense_handlers(dp, *, user_id, user_name, chat_id):
             await event.message.answer('Отменено.')
             return
         kind, _, value = payload.partition(':')
-        if kind == 'mstructure' and value in STRUCTURES:
-            await context.update_data(expense_structure=value)
-            await context.set_state(ExpenseDialog.category)
-            options = [(CATEGORIES[k], 'mcategory:'+k) for k in PRIMARY_CATEGORIES] + [('Другое', 'mcategory:other')]
-            await event.message.answer('Выберите категорию:', attachments=[keyboard(options)])
-        elif kind == 'mcategory' and value == 'other':
-            await event.message.answer('Другие категории:', attachments=[keyboard([(v, 'mcategory:'+k) for k, v in CATEGORIES.items() if k not in PRIMARY_CATEGORIES])])
-        elif kind == 'mcategory' and value in CATEGORIES:
+        if kind == 'mcategory' and value in CATEGORIES:
             await context.update_data(expense_category=value)
             await context.set_state(ExpenseDialog.amount)
             await event.message.answer('Сколько потратили? Введите сумму в рублях, например: 4000 или 4 000,50.')
@@ -121,7 +112,6 @@ def register_expense_handlers(dp, *, user_id, user_name, chat_id):
         await context.clear()
 
 
-    @dp.message_created(ExpenseDialog.structure)
     @dp.message_created(ExpenseDialog.category)
     @dp.message_created(ExpenseDialog.confirming)
     @protected

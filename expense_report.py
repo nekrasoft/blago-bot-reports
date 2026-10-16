@@ -5,10 +5,10 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CallbackQueryHandler, CommandHandler, ConversationHandler, MessageHandler, filters
 
-from expense import STRUCTURES, CATEGORIES, PRIMARY_CATEGORIES, parse_amount, set_purpose, expense_summary, confirmation_payload, prepare_expense, expense_chat_allowed
+from expense import CATEGORIES, parse_amount, set_purpose, expense_summary, confirmation_payload, prepare_expense, expense_chat_allowed
 from expense_outbox import enqueue_expense
 
-STRUCTURE, CATEGORY, AMOUNT, PURPOSE, CONFIRM = range(5)
+CATEGORY, AMOUNT, PURPOSE, CONFIRM = range(1, 5)
 logger = logging.getLogger(__name__)
 
 
@@ -35,8 +35,8 @@ async def start(update, context):
     if not await allowed(update):
         return ConversationHandler.END
     clear_expense(context.user_data)
-    await update.message.reply_text('Расход. Выберите структуру:', reply_markup=keyboard([(v, 'mstructure:'+k) for k, v in STRUCTURES.items()]))
-    return STRUCTURE
+    await update.message.reply_text('Расход. Выберите категорию:', reply_markup=keyboard([(v, 'mcategory:'+k) for k, v in CATEGORIES.items()]))
+    return CATEGORY
 
 
 async def choose(update, context):
@@ -49,13 +49,6 @@ async def choose(update, context):
         await query.edit_message_text('Отменено.')
         return ConversationHandler.END
     kind, value = query.data.split(':', 1)
-    if kind == 'mstructure' and value in STRUCTURES:
-        context.user_data['expense_structure'] = value
-        await query.edit_message_text('Выберите категорию:', reply_markup=keyboard([(CATEGORIES[k], 'mcategory:'+k) for k in PRIMARY_CATEGORIES] + [('Другое', 'mcategory:other')]))
-        return CATEGORY
-    if kind == 'mcategory' and value == 'other':
-        await query.edit_message_text('Другие категории:', reply_markup=keyboard([(v, 'mcategory:'+k) for k, v in CATEGORIES.items() if k not in PRIMARY_CATEGORIES]))
-        return CATEGORY
     if kind == 'mcategory' and value in CATEGORIES:
         context.user_data['expense_category'] = value
         await query.edit_message_text('Сколько потратили? Введите сумму в рублях, например: 4000 или 4 000,50.')
@@ -124,8 +117,7 @@ async def cancel(update, context):
 
 def get_expense_conversation_handler():
     return ConversationHandler(entry_points=[CommandHandler('m', start)], states={
-        STRUCTURE: [CallbackQueryHandler(choose, pattern=r'^(mstructure:120[12]|mcancel)$')],
-        CATEGORY: [CallbackQueryHandler(choose, pattern=r'^(mcategory:(182|183|185|117|115|124|149|other)|mcancel)$')],
+        CATEGORY: [CallbackQueryHandler(choose, pattern=r'^(mcategory:(182|117|185)|mcancel)$')],
         AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, amount)],
         PURPOSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, purpose)],
         CONFIRM: [CallbackQueryHandler(confirm, pattern=r'^(mconfirm:[a-f0-9]{32}|mcancel)$')],

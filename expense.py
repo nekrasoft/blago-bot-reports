@@ -7,10 +7,9 @@ import re
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-STRUCTURES = {'1202': 'ЮЛ - Контейнеры', '1201': 'ЮЛ - Вывоз мусора'}
-CATEGORIES = {'182': 'Ремонт а/м и ТО', '183': 'ГСМ', '185': 'Утилизация (полигон)',
-              '117': 'Хозяйственные расходы', '115': 'Материалы', '124': 'Связь и интернет', '149': 'Штрафы ПДД'}
-PRIMARY_CATEGORIES = ('182', '183', '185')
+STRUCTURE_CODE = '1202'
+STRUCTURE_NAME = 'ЮЛ - Контейнеры'
+CATEGORIES = {'182': 'Ремонт а/м и ТО', '117': 'Хозяйственные расходы', '185': 'Утилизация (полигон)'}
 
 
 def expense_chat_allowed(chat_id) -> bool:
@@ -41,7 +40,7 @@ def confirmation_payload(data: dict) -> str:
 
 def expense_summary(data: dict) -> str:
     return (f"Расход: {data['expense_amount']} ₽\n"
-            f"Структура: {STRUCTURES[data['expense_structure']]}\n"
+            f"Структура: {STRUCTURE_NAME}\n"
             f"Категория: {CATEGORIES[data['expense_category']]}\n"
             f"На что: {data['expense_purpose']}")
 
@@ -51,15 +50,14 @@ def prepare_expense(data: dict, *, source: str, user_id, name: str | None, now=N
         return data['expense_submission']
     if source not in ('telegram', 'max') or user_id is None:
         raise ValueError('Не удалось определить водителя.')
-    structure = data['expense_structure']
     category = data['expense_category']
-    if structure not in STRUCTURES or category not in CATEGORIES:
-        raise ValueError('Выберите структуру и категорию расхода.')
+    if category not in CATEGORIES:
+        raise ValueError('Выберите категорию расхода.')
     amount = parse_amount(data['expense_amount'])
     set_purpose(data, data.get('expense_purpose', ''))
     date = now or datetime.now(ZoneInfo('Europe/Moscow'))
     row = {'Дата': date.strftime('%d.%m.%Y'), 'Месяц': str(date.month),
-           'Структура': STRUCTURES[structure], 'КСП': structure, 'Операция': CATEGORIES[category], 'КСЗ': category,
+           'Структура': STRUCTURE_NAME, 'КСП': STRUCTURE_CODE, 'Операция': CATEGORIES[category], 'КСЗ': category,
            'Контрагент': '', 'Примечание': data['expense_purpose'], 'Расход': amount, 'Приход': '',
            'Объект': '', 'Выручка': '', '_skip_formula_columns': ['Выручка'], '_formula_columns': ['Месяц', 'Сальдо']}
     submission = {'key': data.setdefault('expense_key', str(uuid4())), 'source': source,
