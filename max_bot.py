@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
+from functools import wraps
+from weakref import WeakValueDictionary
 import logging
 import mimetypes
 import os
@@ -43,6 +44,7 @@ from bunker_pickup import (
     format_billing_units,
     pickup_group_key,
 )
+from expense_max import register_expense_handlers
 from driver_time_buttons import (
     DRIVER_START_TIME_OPTIONS,
     get_driver_end_time_options,
@@ -64,9 +66,7 @@ from map_client import (
 )
 from persistent_context import PersistentMaxContext
 from pickup_submission import prepare_submission, send_submission, submission_identity
-from sheets_client import append_rows
-from waybill_files_db import save_waybill_file
-from waybill_notes import format_note_with_waybill_token, generate_waybill_token
+from trip_pickup import confirmation_payload, trip_sites, manual_site, add_trip_photos, trip_summary, prepare_trip_submission
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -79,7 +79,6 @@ logger = logging.getLogger(__name__)
 
 PAGE_SIZE = 8
 NOT_ALLOWED_MSG = "Извините, бот не может работать в этой группе."
-OPERATIONS_PATH = Path(__file__).resolve().parent / "data" / "operations.json"
 
 
 def _get_allowed_chat_ids() -> set[int]:
@@ -102,6 +101,9 @@ class BunkerDialog(StatesGroup):
 
 
 class HodkaDialog(StatesGroup):
+    selecting_site = State()
+    waiting_photos = State()
+    confirming = State()
     selecting = State()
     waiting_count = State()
     waiting_volume = State()
@@ -221,57 +223,6 @@ def _pickup_confirm_keyboard_max(files=()):
 
 def _counterparty_title(item: dict) -> str:
     return str(item.get("shortName") or item.get("name") or "").strip()
-
-
-def _load_trip_operation() -> dict:
-    default = {
-        "структура": "ЮЛ - Вывоз мусора",
-        "ксп": "1201",
-        "операция": "Поступление по основной деятельности",
-        "ксз": "1001",
-    }
-    try:
-        with open(OPERATIONS_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("trip_removal", default) or default
-    except Exception:
-        return default
-
-
-def _build_trip_row(
-    contractor: str,
-    trips_count: int,
-    date_str: str,
-    note: str = "",
-    cash_income: str | None = None,
-) -> dict:
-    """Строка для таблицы: ходка/рейс (trip_removal)."""
-    try:
-        dt = datetime.strptime(date_str, "%d.%m.%Y")
-    except ValueError:
-        dt = datetime.now()
-
-    op = _load_trip_operation()
-    structure = "ФЛ - Вывоз мусора" if _is_private_contractor(contractor) else op.get(
-        "структура",
-        "ЮЛ - Вывоз мусора",
-    )
-    row = {
-        "Дата": date_str,
-        "Месяц": str(dt.month),
-        "Структура": structure,
-        "КСП": op.get("ксп", "1201"),
-        "Операция": op.get("операция", "Поступление по основной деятельности"),
-        "КСЗ": op.get("ксз", "1001"),
-        "Контрагент": contractor,
-        "Примечание": note,
-        "Объект": str(trips_count),
-    }
-    if cash_income:
-        row["Приход"] = cash_income
-        row["Выручка"] = ""
-        row["_skip_formula_columns"] = ["Выручка"]
-    return row
 
 
 def _parse_trips_count(text: str) -> int | None:
@@ -750,57 +701,153 @@ async def _start_driver_time_dialog(
     )
 
 
-async def _append_hodka_report_max(
-    event: MessageCreated | MessageCallback,
-    context: MemoryContext,
-    *,
-    waybill_token: str | None,
-) -> None:
+_hodka_locks = WeakValueDictionary()
+
+
+def _serialize_hodka(handler):
+    @wraps(handler)
+    async def serialized(event, context):
+        key = _max_user_id(event)
+        lock = _hodka_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            return await handler(event, context)
+    return serialized
+
+
+def _hodka_keyboard_max(action: str, label: str):
+    builder = InlineKeyboardBuilder()
+    builder.row(CallbackButton(text=label, payload=action))
+    builder.row(CallbackButton(text="Отмена", payload="hcancel"))
+    return builder.as_markup()
+
+
+async def _ask_hodka_photos_max(event, context, *, waybill_token=None):
     data = await context.get_data()
-    contractor = str(data.get("hodka_selected_contractor") or "").strip()
-    trips_count = data.get("hodka_trips_count")
-    volume_note = str(data.get("hodka_volume_note") or "").strip()
-    cash_income = str(data.get("hodka_cash_income") or "").strip()
-    date_str = str(data.get("hodka_date_str") or "").strip()
-    if (
-        not contractor
-        or not trips_count
-        or not volume_note
-        or not date_str
-        or (_is_private_contractor(contractor) and not cash_income)
-    ):
+    if not data.get('hodka_site') or not data.get('hodka_counterparty_id'):
         await context.clear()
-        await event.message.answer("Данные отчёта устарели. Запустите /h заново.")
+        await event.message.answer('Диалог был начат до обновления. Запустите /h заново и выберите площадку.')
         return
+    await context.set_state(HodkaDialog.waiting_photos)
+    await event.message.answer("Прикрепите до 10 фото кузова до/после вывоза. Можно загрузить несколько фото одним сообщением; разделять их по типам не нужно.",
+        attachments=[_hodka_keyboard_max("hphotos_done", "Готово / Без фото")])
 
-    note = format_note_with_waybill_token(volume_note, waybill_token) if waybill_token else volume_note
-    row = _build_trip_row(
-        contractor,
-        int(trips_count),
-        date_str,
-        note,
-        cash_income=cash_income or None,
-    )
 
-    try:
-        append_rows([row])
-    except Exception as e:
-        await event.message.answer(f"Ошибка записи в таблицу: {e}")
-        return
-
-    await context.clear()
-    if _is_private_contractor(contractor):
-        suffix = ""
-    else:
-        suffix = " Путевой лист принят." if waybill_token else " Путевой лист пропущен."
-    cash_text = f", наличка: {cash_income}" if cash_income else ""
-    await event.message.answer(
-        text=f"Записано: {contractor}, ходок: {trips_count}, {volume_note}{cash_text}.{suffix}"
-    )
 
 
 bot = Bot(token=os.environ.get("MAX_BOT_TOKEN", ""))
 dp = Dispatcher(storage=PersistentMaxContext)
+register_expense_handlers(dp, user_id=_max_user_id, user_name=_max_user_name, chat_id=_max_chat_id)
+
+
+@dp.message_callback(HodkaDialog.selecting_site)
+@_serialize_hodka
+async def handle_hodka_site_callback(event, context):
+    payload = event.callback.payload or ''
+    if payload == 'hcancel':
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    if payload == 'hsite:manual':
+        await event.message.answer("Введите площадку: район; адрес. Например: Знак; ул. Дмитрия Козулева, 10к1")
+        return
+    data = await context.get_data()
+    try:
+        site = data['hodka_sites'][int(payload.split(':')[1])]
+    except (KeyError, IndexError, ValueError):
+        await event.message.answer("Список устарел. Запустите /h заново.")
+        return
+    await context.update_data(hodka_site=site)
+    await context.set_state(HodkaDialog.waiting_count)
+    await event.message.answer("Введите количество ходок (целое число):")
+
+
+@dp.message_created(HodkaDialog.selecting_site)
+@_serialize_hodka
+async def handle_hodka_manual_site(event, context):
+    text = str(getattr(getattr(event.message, 'body', None), 'text', '') or '')
+    if text.lower().strip() in {'отмена', '/cancel', 'cancel'}:
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    try:
+        site = manual_site(text)
+    except ValueError as e:
+        await event.message.answer(str(e))
+        return
+    await context.update_data(hodka_site=site)
+    await context.set_state(HodkaDialog.waiting_count)
+    await event.message.answer("Введите количество ходок (целое число):")
+
+
+@dp.message_created(HodkaDialog.waiting_photos)
+@_serialize_hodka
+async def handle_hodka_photos(event, context):
+    text = str(getattr(getattr(event.message, 'body', None), 'text', '') or '').lower().strip()
+    if text in {'отмена', '/cancel', 'cancel'}:
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    try:
+        data = await context.get_data()
+        attachments = list(getattr(getattr(event.message, 'body', None), 'attachments', None) or [])
+        if len(data.get('hodka_photos') or []) + sum(_attachment_type_text(a) == 'image' for a in attachments) > 10:
+            raise ValueError('Можно прикрепить не более 10 фото кузова.')
+        incoming = await _download_max_site_photos(event.message)
+        count = add_trip_photos(data, incoming)
+        await context.update_data(hodka_photos=data['hodka_photos'])
+        await event.message.answer(f"Фото: {count}/10", attachments=[_hodka_keyboard_max("hphotos_done", "Готово")])
+    except ValueError as e:
+        await event.message.answer(str(e))
+    except Exception:
+        logger.exception("Не удалось загрузить фото ходки")
+        await event.message.answer("Фото не загружено. Попробуйте ещё раз.")
+
+
+@dp.message_callback(HodkaDialog.waiting_photos)
+@_serialize_hodka
+async def handle_hodka_photos_done(event, context):
+    if event.callback.payload == 'hcancel':
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    if event.callback.payload != 'hphotos_done':
+        return
+    data = await context.get_data()
+    payload = confirmation_payload(data)
+    await context.update_data(hodka_confirmation_key=data['hodka_confirmation_key'])
+    await context.set_state(HodkaDialog.confirming)
+    await event.message.answer(trip_summary(data), attachments=[_hodka_keyboard_max(payload, 'Подтвердить отчёт')])
+
+
+@dp.message_callback(HodkaDialog.confirming)
+@_serialize_hodka
+async def handle_hodka_confirm(event, context):
+    if event.callback.payload == 'hcancel':
+        await context.clear()
+        await event.message.answer("Отменено.")
+        return
+    data = await context.get_data()
+    if not data.get('hodka_site') or event.callback.payload != confirmation_payload(data):
+        return
+    try:
+        submission = prepare_trip_submission(data, source='max', user_id=_max_user_id(event), name=_max_user_name(event),
+            chat_id=_max_chat_id(event), message_id=_max_message_id(event))
+        await context.update_data(hodka_submission=submission)
+        await asyncio.to_thread(send_submission, submission)
+    except PickupReportRejected:
+        logger.exception("API отклонило отчёт по ходкам")
+        await event.message.answer("Отчёт не принят. Проверьте данные у диспетчера и запустите /h заново.")
+        return
+    except ValueError as e:
+        await event.message.answer(str(e))
+        return
+    except Exception:
+        logger.exception("Не удалось подтвердить сохранение ходки")
+        await event.message.answer("Не удалось получить подтверждение. Данные сохранены; повторная отправка не создаст дубликат.",
+            attachments=[_hodka_keyboard_max(confirmation_payload(data), 'Повторить подтверждение')])
+        return
+    await event.message.answer("Отчёт принят.\n\n" + trip_summary(data))
+    await context.clear()
 
 
 @dp.bot_added()
@@ -840,6 +887,7 @@ async def handle_bunker_request(event: MessageCreated, context: MemoryContext) -
 
 
 @dp.message_created(Command("h"))
+@_serialize_hodka
 async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> None:
     """Команда /h — ходка/рейс: выбор trip_removal-контрагента и ввод количества."""
     counterparties = [
@@ -851,6 +899,7 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
         )
         return
 
+    await context.clear()
     await context.set_state(HodkaDialog.selecting)
     await context.update_data(
         hodka_counterparties=counterparties,
@@ -860,7 +909,6 @@ async def handle_hodka_start(event: MessageCreated, context: MemoryContext) -> N
         hodka_volume_note="",
         hodka_cash_income="",
         hodka_date_str="",
-        hodka_waybill_token="",
     )
 
     markup, _, _ = _build_hodka_keyboard_max(counterparties, 0)
@@ -1565,13 +1613,13 @@ async def handle_bunker_confirm(event: MessageCallback, context: MemoryContext) 
         await event.message.answer("Не удалось получить подтверждение. Данные сохранены — нажмите «Подтвердить» повторно: дубликат вывоза не создастся.")
         return
     report = _format_bunker_report(log)
-    report += "\n\nЗапись в расчётную таблицу поставлена в очередь. Если таблица недоступна, доставка повторится автоматически."
     await context.clear()
     await event.message.delete()
     await event.message.answer(report)
 
 
 @dp.message_callback(HodkaDialog.selecting)
+@_serialize_hodka
 async def handle_hodka_callback(event: MessageCallback, context: MemoryContext) -> None:
     """Обработка кнопок выбора контрагента для /h."""
     payload = event.callback.payload or ""
@@ -1623,16 +1671,19 @@ async def handle_hodka_callback(event: MessageCallback, context: MemoryContext) 
         await event.message.answer("Контрагент не найден. Попробуйте снова.")
         return
 
-    await context.set_state(HodkaDialog.waiting_count)
-    await context.update_data(hodka_selected_contractor=contractor)
-
-    await event.message.delete()
-    await event.message.answer(
-        text=f"Контрагент: {contractor}\nВведите количество ходок (целое число):"
-    )
+    sites = await asyncio.to_thread(trip_sites, counterparties[idx]['id'])
+    await context.set_state(HodkaDialog.selecting_site)
+    await context.update_data(hodka_selected_contractor=contractor, hodka_counterparty_id=counterparties[idx]['id'], hodka_sites=sites)
+    builder = InlineKeyboardBuilder()
+    for i, site in enumerate(sites):
+        builder.row(CallbackButton(text=f"{site['district']}, {site['address']}"[:100], payload=f"hsite:{i}"))
+    builder.row(CallbackButton(text="Другая площадка / Ввести адрес", payload="hsite:manual"))
+    builder.row(CallbackButton(text="Отмена", payload="hcancel"))
+    await event.message.answer(f"Контрагент: {contractor}\nВыберите площадку:", attachments=[builder.as_markup()])
 
 
 @dp.message_created(HodkaDialog.waiting_count)
+@_serialize_hodka
 async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> None:
     """Приём количества ходок и переход к выбору объёма."""
     body = getattr(event.message, "body", None)
@@ -1662,7 +1713,6 @@ async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> N
     await context.update_data(
         hodka_trips_count=trips_count,
         hodka_date_str=date_str,
-        hodka_waybill_token=generate_waybill_token(),
     )
     await event.message.answer(
         text="Выберите кузов или введите общий объём вывезенного мусора вручную:",
@@ -1671,9 +1721,6 @@ async def handle_hodka_count(event: MessageCreated, context: MemoryContext) -> N
 
 
 async def _ask_waybill_max(event: MessageCreated | MessageCallback, context: MemoryContext) -> None:
-    data = await context.get_data()
-    if not str(data.get("hodka_waybill_token") or "").strip():
-        await context.update_data(hodka_waybill_token=generate_waybill_token())
     await context.set_state(HodkaDialog.waiting_file)
     await event.message.answer(
         text=(
@@ -1699,6 +1746,7 @@ async def _ask_cash_or_waybill_max(
 
 
 @dp.message_callback(HodkaDialog.waiting_volume)
+@_serialize_hodka
 async def handle_hodka_volume_callback(event: MessageCallback, context: MemoryContext) -> None:
     """Обработка кнопок выбора объёма для /h."""
     payload = event.callback.payload or ""
@@ -1733,6 +1781,7 @@ async def handle_hodka_volume_callback(event: MessageCallback, context: MemoryCo
 
 
 @dp.message_created(HodkaDialog.waiting_volume)
+@_serialize_hodka
 async def handle_hodka_volume(event: MessageCreated, context: MemoryContext) -> None:
     """Приём ручного итогового объёма для /h."""
     body = getattr(event.message, "body", None)
@@ -1756,6 +1805,7 @@ async def handle_hodka_volume(event: MessageCreated, context: MemoryContext) -> 
 
 
 @dp.message_created(HodkaDialog.waiting_cash)
+@_serialize_hodka
 async def handle_hodka_cash(event: MessageCreated, context: MemoryContext) -> None:
     """Приём суммы налички для частника."""
     body = getattr(event.message, "body", None)
@@ -1772,10 +1822,11 @@ async def handle_hodka_cash(event: MessageCreated, context: MemoryContext) -> No
 
     await context.update_data(hodka_cash_income=_format_volume(amount))
     await event.message.answer(text=f"Наличка: {_format_volume(amount)}")
-    await _append_hodka_report_max(event, context, waybill_token=None)
+    await _ask_hodka_photos_max(event, context, waybill_token=None)
 
 
 @dp.message_callback(HodkaDialog.waiting_file)
+@_serialize_hodka
 async def handle_hodka_file_callback(event: MessageCallback, context: MemoryContext) -> None:
     """Обработка кнопок на этапе загрузки путевого листа."""
     payload = event.callback.payload or ""
@@ -1789,10 +1840,11 @@ async def handle_hodka_file_callback(event: MessageCallback, context: MemoryCont
 
     await event.message.delete()
     await event.message.answer(text="Путевой лист пропущен.")
-    await _append_hodka_report_max(event, context, waybill_token=None)
+    await _ask_hodka_photos_max(event, context, waybill_token=None)
 
 
 @dp.message_created(HodkaDialog.waiting_file)
+@_serialize_hodka
 async def handle_hodka_file(event: MessageCreated, context: MemoryContext) -> None:
     """Приём путевого листа или отказа от загрузки."""
     body = getattr(event.message, "body", None)
@@ -1802,7 +1854,7 @@ async def handle_hodka_file(event: MessageCreated, context: MemoryContext) -> No
         await event.message.answer("Отменено.")
         return
     if text in {"нет", "не", "no", "skip", "пропустить", "без файла"}:
-        await _append_hodka_report_max(event, context, waybill_token=None)
+        await _ask_hodka_photos_max(event, context, waybill_token=None)
         return
 
     attachments = list(getattr(body, "attachments", None) or [])
@@ -1813,36 +1865,19 @@ async def handle_hodka_file(event: MessageCreated, context: MemoryContext) -> No
         )
         return
 
-    data = await context.get_data()
-    token = str(data.get("hodka_waybill_token") or "").strip()
-    if not token:
-        token = generate_waybill_token()
-        await context.update_data(hodka_waybill_token=token)
-
     try:
         file_info = await _download_max_waybill(event.message)
-        save_waybill_file(
-            file_token=token,
-            source="max",
-            file_bytes=file_info["file_bytes"],
-            source_chat_id=_max_chat_id(event),
-            source_user_id=_max_user_id(event),
-            source_message_id=_max_message_id(event),
-            source_file_id=file_info["source_file_id"],
-            file_name=file_info["file_name"],
-            content_type=file_info["content_type"],
-        )
+        await context.update_data(hodka_waybill=file_info)
     except ValueError as e:
         await event.message.answer(str(e))
         return
-    except Exception as e:
-        await event.message.answer(
-            "Не удалось сохранить путевой лист в БД. "
-            f"Попробуйте отправить файл ещё раз или пропустите его. Ошибка: {e}"
-        )
+    except Exception:
+        logger.exception("Не удалось загрузить путевой лист ходки")
+        await event.message.answer("Не удалось загрузить путевой лист. Попробуйте ещё раз.")
         return
+    await _ask_hodka_photos_max(event, context)
 
-    await _append_hodka_report_max(event, context, waybill_token=token)
+
 
 
 def main() -> None:

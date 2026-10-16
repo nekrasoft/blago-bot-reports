@@ -776,7 +776,6 @@ async def confirm_pickup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Повторить подтверждение", callback_data="confirm")]]))
         return STATE_CONFIRM
     report = _format_bunker_report(log)
-    report += "\n\nЗапись в расчётную таблицу поставлена в очередь. Если таблица недоступна, доставка повторится автоматически."
     await query.edit_message_text(report)
     _clear_report(context)
     return ConversationHandler.END

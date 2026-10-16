@@ -16,7 +16,7 @@ from sheets_client import _load_schema, _parse_sheet_url, _col_letter, get_sheet
 logger = logging.getLogger(__name__)
 
 
-def append_pickup_row(row: dict, submission_key: str) -> None:
+def append_pickup_row(row: dict, submission_key: str, *, marker_kind: str = 'ВЫВОЗ') -> None:
     """Write one atomic row; recover an ambiguous result by its marker."""
     client = get_sheets_client()
     client.set_timeout(60)
@@ -28,7 +28,7 @@ def append_pickup_row(row: dict, submission_key: str) -> None:
     spreadsheet = client.open_by_key(sheet_id)
     worksheet = spreadsheet.get_worksheet_by_id(gid) if gid is not None else spreadsheet.sheet1
     columns = schema['google_sheet_columns']
-    marker = f'[ВЫВОЗ:{submission_key}]'
+    marker = f'[{marker_kind}:{submission_key}]'
     notes = worksheet.col_values(columns.index('Примечание') + 1)
     matches = [index + 1 for index, note in enumerate(notes) if marker in str(note)]
     if len(matches) > 1:
@@ -43,7 +43,7 @@ def append_pickup_row(row: dict, submission_key: str) -> None:
         value = values.get(name, '')
         if name == 'Дата':
             value = (datetime.strptime(str(value), '%d.%m.%Y') - datetime(1899, 12, 30)).days
-        elif name == 'Объект':
+        elif name in ('Объект', 'Расход', 'Приход') and value != '':
             value = float(str(value).replace(',', '.'))
         cells.append({'userEnteredValue': {'numberValue': value} if isinstance(value, (int, float)) else {'stringValue': str(value)}})
     area = dict(sheetId=worksheet.id, startRowIndex=destination, endRowIndex=destination + 1)
@@ -56,7 +56,7 @@ def append_pickup_row(row: dict, submission_key: str) -> None:
                         'cell': {'userEnteredFormat': {'numberFormat': {'type': 'DATE', 'pattern': 'dd.mm.yyyy'}}},
                         'fields': 'userEnteredFormat.numberFormat'}},
     ]
-    for name in schema.get('formula_columns', ['Месяц', 'Выручка']):
+    for name in row.get('_formula_columns', schema.get('formula_columns', ['Месяц', 'Выручка'])):
         if name not in columns or name in row.get('_skip_formula_columns', []):
             continue
         column = columns.index(name)
@@ -96,6 +96,7 @@ def deliver_one(client: httpx.Client) -> bool:
 
 def start_delivery_worker() -> None:
     def run():
+        from expense_outbox import deliver_expense_one
         with (state_directory() / 'pickup-delivery.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             with httpx.Client(timeout=60) as client:
@@ -106,5 +107,10 @@ def start_delivery_worker() -> None:
                     except Exception:
                         logger.exception('Не удалось обработать очередь расчётной таблицы')
                         delay = 60
+                    try:
+                        if deliver_expense_one():
+                            delay = 2
+                    except Exception:
+                        logger.exception('Не удалось доставить расход в кассу; попытка будет повторена')
                     threading.Event().wait(delay)
     threading.Thread(target=run, name='pickup-sheet-delivery', daemon=True).start()

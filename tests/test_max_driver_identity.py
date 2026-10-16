@@ -47,7 +47,6 @@ class MaxDriverIdentityTest(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(pickup_submission, "create_pickup_report") as create_report,
-            patch.object(max_bot, "append_rows"),
             patch.object(max_bot, "_format_bunker_report", return_value="Сохранено"),
         ):
             await max_bot.handle_bunker_confirm(event, context)

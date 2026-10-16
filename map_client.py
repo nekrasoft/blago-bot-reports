@@ -53,14 +53,15 @@ def _get_write_api_headers() -> dict:
     return _build_api_key_headers(write_key)
 
 
-def get_all_bunkers() -> list[dict]:
+def get_all_bunkers(*, counterparty_id=None) -> list[dict]:
     """Получение всех бункеров с карты."""
     base = _get_base_url()
     if not base or not httpx:
         return []
     headers = _get_read_api_headers()
     try:
-        resp = httpx.get(f"{base}/api/bunkers", headers=headers, timeout=10.0)
+        options = {"params": {"counterpartyId": counterparty_id}} if counterparty_id is not None else {}
+        resp = httpx.get(f"{base}/api/bunkers", headers=headers, timeout=10.0, **options)
         resp.raise_for_status()
         data = resp.json()
         logger.info("Карта: GET /api/bunkers — загружено %s бункеров", len(data))
@@ -107,6 +108,8 @@ class PickupReportRejected(RuntimeError):
 def create_pickup_report(
     *,
     items: list[dict],
+    report_type: str = "bunker",
+    trip_details: dict | None = None,
     submission_key: str | None = None,
     sheet_row: dict | None = None,
     cleanup_status: str,
@@ -136,6 +139,10 @@ def create_pickup_report(
         "waybillTokens": waybill_tokens or [],
         "waybillMissingReason": waybill_missing_reason,
     }
+    if report_type != "bunker":
+        payload["reportType"] = report_type
+    if trip_details:
+        payload.update(trip_details)
     files = []
     for index, photo in enumerate(site_photos or [], start=1):
         files.append(
