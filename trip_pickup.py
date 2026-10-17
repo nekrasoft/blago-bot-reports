@@ -143,7 +143,9 @@ def prepare_trip_submission(data: dict, *, source, user_id, name, chat_id, messa
     if data.get('hodka_submission'):
         return data['hodka_submission']
     volume = _parse_volume(data['hodka_volume_note'])
-    if volume is None or volume > 100000 or not 1 <= int(data['hodka_trips_count']) <= 1000:
+    if volume is not None:
+        volume = volume.quantize(Decimal('0.01'))
+    if volume is None or volume <= 0 or volume > 100000 or not 1 <= int(data['hodka_trips_count']) <= 1000:
         raise ValueError('Проверьте количество ходок и общий объём.')
     if not data.get('hodka_counterparty_id'):
         raise ValueError('Не выбран контрагент. Запустите /h заново.')
@@ -151,6 +153,8 @@ def prepare_trip_submission(data: dict, *, source, user_id, name, chat_id, messa
     note = ', '.join(filter(None, (data['hodka_volume_note'], site['district'], site['address'])))
     row = _build_trip_row(data['hodka_selected_contractor'], data['hodka_trips_count'], data['hodka_date_str'], note,
                           cash_income=data.get('hodka_cash_income') or None)
+    if not data.get('hodka_cash_income'):
+        row.update({'Объём, м³': str(volume), 'Единица тарифа': 'м³'})
     draft = {'site_photos': data.get('hodka_photos') or [],
              'waybills': [data['hodka_waybill']] if data.get('hodka_waybill') else []}
     submission = prepare_submission(draft, source=source, user_id=user_id, name=name, chat_id=chat_id, message_id=message_id,

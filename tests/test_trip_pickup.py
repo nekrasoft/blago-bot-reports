@@ -23,7 +23,7 @@ class TripPickupTest(unittest.TestCase):
         data = trip_data()
         data.update(hodka_selected_contractor='Частник', hodka_cash_income='7 000'.replace(' ', ''))
         submission = prepare_trip_submission(data, source='max', user_id=42, name='Водитель', chat_id=1)
-        self.assertEqual(submission['request']['trip_details']['tripVolumeM3'], '60')
+        self.assertEqual(submission['request']['trip_details']['tripVolumeM3'], '60.00')
         self.assertEqual(submission['row']['Объект'], '2')
         self.assertEqual(submission['row']['Приход'], '7000')
         self.assertEqual(submission['row']['Выручка'], '')
