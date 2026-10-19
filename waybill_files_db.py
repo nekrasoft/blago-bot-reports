@@ -69,6 +69,7 @@ def save_waybill_file(
     file_token: str,
     source: str,
     file_bytes: bytes,
+    kind: str = "container_waybill",
     source_chat_id: str | int | None = None,
     source_user_id: str | int | None = None,
     source_message_id: str | int | None = None,
@@ -76,9 +77,12 @@ def save_waybill_file(
     file_name: str | None = None,
     content_type: str | None = None,
 ) -> str:
+    if kind not in ("container_waybill", "site_photo"):
+        raise ValueError("Неизвестный тип файла отчёта")
     digest = hashlib.sha256(file_bytes).hexdigest()
     values = {
         "file_token": file_token,
+        "kind": kind,
         "source": source,
         "source_chat_id": _optional_str(source_chat_id, max_len=64),
         "source_user_id": _optional_str(source_user_id, max_len=64),
@@ -99,6 +103,7 @@ def save_waybill_file(
     engine = _get_engine()
     stmt = mysql_insert(table).values(**values)
     stmt = stmt.on_duplicate_key_update(
+        kind=stmt.inserted.kind,
         source=stmt.inserted.source,
         source_chat_id=stmt.inserted.source_chat_id,
         source_user_id=stmt.inserted.source_user_id,

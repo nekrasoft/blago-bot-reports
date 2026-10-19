@@ -44,6 +44,7 @@ def send_submission(submission: dict) -> dict:
     for file, token in zip(request["waybills"] + request["site_photos"],
                            request["waybill_tokens"] + submission["photo_tokens"], strict=True):
         save_waybill_file(file_token=token, source=request["driver_source"], file_bytes=file["file_bytes"],
+            kind="site_photo" if token in submission["photo_tokens"] else "container_waybill",
             source_chat_id=submission["chat_id"], source_user_id=request["driver_user_id"],
             source_message_id=file.get("source_message_id") or submission["message_id"],
             source_file_id=file.get("source_file_id"), file_name=file.get("file_name"), content_type=file.get("content_type"))

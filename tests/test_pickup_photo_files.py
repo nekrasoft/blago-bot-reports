@@ -66,6 +66,8 @@ class PickupPhotoFilesTest(unittest.IsolatedAsyncioTestCase):
 
                     tokens = [call.kwargs["file_token"] for call in save.call_args_list]
                     self.assertEqual(save.call_count, len(waybills) + 1)
+                    self.assertEqual([call.kwargs["kind"] for call in save.call_args_list],
+                                     ["container_waybill"] * len(waybills) + ["site_photo"])
                     self.assertEqual(
                         [call.kwargs["file_bytes"] for call in save.call_args_list],
                         [file["file_bytes"] for file in waybills + [photo]],
