@@ -57,10 +57,11 @@ def main():
     headers = list(price_rows[0])
     width = max(map(len, price_rows))
     headers += [''] * (width - len(headers))
-    for name in ('Единица тарифа', 'Тариф за м³'):
-        if name not in headers:
+    for name, short in (('Единица тарифа', 'Ед.'), ('Тариф за м³', 'Тариф')):
+        if name not in headers and short not in headers:
             headers.append(name)
-    unit_col, tariff_col = headers.index('Единица тарифа'), headers.index('Тариф за м³')
+    unit_col = headers.index('Единица тарифа') if 'Единица тарифа' in headers else headers.index('Ед.')
+    tariff_col = headers.index('Тариф за м³') if 'Тариф за м³' in headers else headers.index('Тариф')
     trip_names = {c['shortName'] or c['name'] for c in get_trip_removal_counterparties()}
     if not trip_names:
         raise ValueError('Справочник вывозов пуст; изменение остановлено.')

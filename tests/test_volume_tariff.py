@@ -20,6 +20,27 @@ class VolumeTariffTest(unittest.TestCase):
         return {'Дата': '17.10.2026', 'Контрагент': 'Клиент', 'Объект': '1',
                 'Примечание': 'Площадка', 'Единица тарифа': 'м³', 'Объём, м³': str(volume)}
 
+    def test_current_sheet_short_headers_keep_existing_tariff(self):
+        book = self.book()
+        book.worksheet.return_value.get_all_values.return_value = [
+            ['Контрагент', 'Цена', 'Ед.', 'Тариф'],
+            ['Акмаш', '42000', 'м³', '1\u00a0400,00'],
+        ]
+        row = {**self.row(36), 'Контрагент': 'Акмаш'}
+        result = apply_volume_tariff(book, row)
+        self.assertEqual(result['Тариф на дату вывоза'], '1400.00')
+        self.assertEqual(result['Выручка'], '50400.00')
+
+    def test_invalid_or_duplicate_headers_have_specific_error(self):
+        for headers, message in [
+            (['Контрагент', 'Цена'], 'нужны колонки'),
+            (['Контрагент', 'Ед.', 'Единица тарифа', 'Тариф'], 'повторяются колонки'),
+        ]:
+            book = self.book()
+            book.worksheet.return_value.get_all_values.return_value = [headers]
+            with self.assertRaisesRegex(ValueError, message):
+                apply_volume_tariff(book, self.row())
+
     def test_proposed_rates_use_exact_division_and_explicit_formula(self):
         self.assertEqual(propose_tariff('42000')[0], '1400')
         self.assertEqual(propose_tariff('51120', '=1420*36')[0], '1420')

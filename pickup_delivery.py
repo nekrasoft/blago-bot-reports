@@ -31,7 +31,13 @@ def apply_volume_tariff(spreadsheet, row: dict) -> dict:
         return number
     volume = positive(row.get('Объём, м³', ''))
     values = spreadsheet.worksheet('Бункеры').get_all_values()
-    prices = [dict(zip(values[0], values_row)) for values_row in values[1:]] if values else []
+    aliases = {'Ед.': 'Единица тарифа', 'Тариф': 'Тариф за м³'}
+    headers = [aliases.get(str(name).strip(), str(name).strip()) for name in values[0]] if values else []
+    if not {'Контрагент', 'Единица тарифа', 'Тариф за м³'}.issubset(headers):
+        raise ValueError('На вкладке «Бункеры» нужны колонки «Контрагент», «Ед.» и «Тариф».')
+    if any(headers.count(name) != 1 for name in ('Контрагент', 'Единица тарифа', 'Тариф за м³')):
+        raise ValueError('На вкладке «Бункеры» повторяются колонки контрагента или тарифа.')
+    prices = [dict(zip(headers, values_row)) for values_row in values[1:]]
     matches = [p for p in prices if str(p.get('Контрагент', '')).strip() == row['Контрагент']]
     if len(matches) != 1 or matches[0].get('Единица тарифа') != 'м³':
         raise ValueError(f"Заполните тариф за м³ для {row['Контрагент']} на вкладке «Бункеры».")
