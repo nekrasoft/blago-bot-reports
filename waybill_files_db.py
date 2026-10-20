@@ -48,6 +48,7 @@ def _get_works_files_table():
         metadata,
         Column("id", Integer, primary_key=True),
         Column("file_token", String(64), nullable=False),
+        Column("kind", String(20), nullable=False),
         Column("work_id", Integer, nullable=True),
         Column("source", String(20), nullable=False),
         Column("source_chat_id", String(64), nullable=True),
